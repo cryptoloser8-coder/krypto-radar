@@ -15,13 +15,13 @@ if (typeof fetch !== 'function') {
   process.exit(1);
 }
 
-const { collectTokens, collectNfts, annotateUniq, candleExtremes, tokenHolders, poolTrades, rugcheckReport, marketContext, tgMembers, setBudget } = require('./lib/sources');
+const { collectTokens, collectNfts, annotateUniq, candleExtremes, tokenHolders, poolTrades, rugcheckReport, marketContext, tgInfo: tgChatInfo, tgLinkKind, setBudget } = require('./lib/sources');
 const { Tape } = require('./lib/tape');
 const { Health } = require('./lib/health');
 const { backup } = require('./lib/backup');
 
 // Wersja danych i strony – strona porównuje ją ze swoją i prosi o odświeżenie, gdy się różnią.
-const APP_VERSION = 9;
+const APP_VERSION = 10;
 const { scoreToken, scoreEarly, scoreNft } = require('./lib/score');
 const security = require('./lib/security');
 const tg = require('./lib/telegram');
@@ -294,6 +294,7 @@ function tokenSnapshot(t, kind, entry, threshold) {
     holdersPre: trendOf(cache.holdersHist, t.key, entry.at),
     tgPre: trendOf(cache.tgHist, t.key, entry.at),
     tgLink: (t.socials && t.socials.telegram) || null,
+    tg: t.tg || tgState(t),
   };
 }
 
@@ -363,6 +364,12 @@ async function tokenAlerts(tokens, now, kind) {
     if (state.alerted[mark] && now - state.alerted[mark] < cool) continue;
     // Token, który jest już „gorący” albo dostał taki alert, nie jest wczesnym sygnałem.
     if (early && (eligibleBase(t) || (state.alerted[t.key] && now - state.alerted[t.key] < cool))) continue;
+    // Telegram tokena sprawdzamy tuż przed alertem (jedno–dwa szybkie zapytania), żeby był w wiadomości.
+    const tl = t.socials && t.socials.telegram;
+    if (tl && cfg.telegram.token && tgLinkKind(tl).s === 'public' && tgStale(tl, now)) await tgCheck(t, now);
+    t.tg = tgState(t);
+    const th = cache.tgHist && cache.tgHist.get(t.key);
+    if (th && th.length) t.tgMembers = th[th.length - 1].c;
     const res = await deliver(early ? tg.earlyAlert(t) : tg.tokenAlert(t));
     if (!res.sent && telegramReady()) {
       // Telegram jest połączony, ale wiadomość nie doszła (sieć, limit) – nie zapisujemy alertu,
@@ -451,16 +458,46 @@ async function sampleCandidates(tokens, now) {
   let tgN = 0;
   for (const t of tokens.slice(0, 30).concat(cands)) {
     const link = t.socials && t.socials.telegram;
-    if (tgN >= 3 || !link || !stale('tgHist', t.key, 15 * 60e3) || !stale('tgMiss', t.key, 6 * 3.6e6)) continue;
+    if (tgN >= 3 || !link || tgLinkKind(link).s !== 'public' || !tgStale(link, now)) continue;
     tgN++;
-    try {
-      const n = await tgMembers(cfg, link);
-      if (n != null) pushHist('tgHist', t.key, n, now);
-      else pushHist('tgMiss', t.key, 0, now);
-    } catch (e) {
-      pushHist('tgMiss', t.key, 0, now);
-    }
+    await tgCheck(t, now);
   }
+}
+
+// ---- Telegram tokena: publiczny (nazwa, członkowie), prywatny, brak ------------------
+// Pamięć: publiczny sprawdzamy ponownie po 15 min (trend członków), nieistniejący po 12 h.
+function tgStale(link, now) {
+  const c = cache.tgInfo && cache.tgInfo.get(link);
+  return !c || now - c.at >= (c.v.s === 'public' ? 15 * 60e3 : 12 * 3.6e6);
+}
+async function tgCheck(t, now) {
+  const link = t.socials && t.socials.telegram;
+  if (!link) return null;
+  cache.tgInfo = cache.tgInfo || new Map();
+  try {
+    const v = await tgChatInfo(cfg, link);
+    cache.tgInfo.set(link, { at: now, v });
+    if (v.n != null) pushHist('tgHist', t.key, v.n, now);
+    return v;
+  } catch (e) {
+    // sieć / limit – zostaje poprzedni stan, spróbujemy później
+    cache.tgInfo.set(link, { at: now - 10 * 60e3, v: (cache.tgInfo.get(link) || { v: tgLinkKind(link) }).v });
+    return null;
+  }
+}
+// Stan do pokazania (bez zapytań): z pamięci albo z samego linku.
+function tgState(t) {
+  const link = t.socials && t.socials.telegram;
+  if (!link) return { s: 'none' };
+  const c = cache.tgInfo && cache.tgInfo.get(link);
+  const v = c ? c.v : tgLinkKind(link);
+  const out = { s: v.s };
+  if (v.name) out.name = v.name;
+  if (v.title) out.title = v.title;
+  if (v.type) out.type = v.type;
+  if (v.n != null) out.n = v.n;
+  if (v.s === 'public' && !c) out.unchecked = 1;
+  return out;
 }
 
 // Dane dociągane po alercie (nie opóźniają wysłania): posiadacze, transakcje, insiderzy, członkowie Telegrama.
@@ -505,8 +542,10 @@ async function processEnrich(now) {
       });
     }
     if (it.tg && cfg.telegram.token) await tryTask('tg', async () => {
-      const n = await tgMembers(cfg, it.tg);
-      return n != null ? { tgMembers: n } : null;
+      const v = await tgChatInfo(cfg, it.tg);
+      const o = { tgStatus: v.s };
+      if (v.n != null) o.tgMembers = v.n;
+      return o;
     });
     if (Object.keys(res).length) {
       a.enrich = a.enrich || {};
@@ -596,6 +635,7 @@ async function scanTokens() {
     if (hh && hh.length) t.holders = hh[hh.length - 1].c;
     const th = cache.tgHist && cache.tgHist.get(t.key);
     if (th && th.length) t.tgMembers = th[th.length - 1].c;
+    t.tg = tgState(t);
   }
 
   for (const t of tokens) {
