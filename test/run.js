@@ -254,6 +254,16 @@ async function integration() {
     assert.ok(detE.d.avgTx && detE.d.avgTx.h1 > 0 && detE.d.holdersPre && detE.d.holdersPre.count > 1000 && detE.d.tgLink === 'https://t.me/early_portal', JSON.stringify(detE.d).slice(0, 400));
     const enE = detE.enrich && detE.enrich.alert;
     assert.ok(enE && enE.holders.count > 1000 && enE.holders.top10 === 31.5 && enE.trades.n === 9 && enE.trades.whales === 1 && enE.tgMembers > 500, JSON.stringify(detE.enrich));
+    // Telegram tokena: publiczny (nazwa, członkowie), prywatny, nieistniejący, brak – w tokenach, alercie i szczegółach.
+    const st2 = await fetchJson(`http://127.0.0.1:${APP}/api/state`);
+    const tgOf = Object.fromEntries(st2.tokens.map((t) => [t.symbol, t.tg]));
+    assert.strictEqual(tgOf.DUMP.s, 'private');
+    assert.strictEqual(tgOf.RUG.s, 'none');
+    assert.ok(tgOf.EARLY.s === 'public' && tgOf.EARLY.title === 'EARLY Portal' && tgOf.EARLY.n > 500 && tgOf.EARLY.type === 'channel', JSON.stringify(tgOf.EARLY));
+    assert.ok(['notfound', 'public'].includes(tgOf.HONEY.s));
+    assert.ok(/📢 Telegram: kanał „EARLY Portal” – \d+ członków/.test(earlyMsgs[0].text) && /<a href="https:\/\/t\.me\/early_portal">Telegram<\/a>/.test(earlyMsgs[0].text), earlyMsgs[0].text);
+    assert.ok(detE.d.tg && detE.d.tg.s === 'public' && detE.d.tg.title === 'EARLY Portal');
+    assert.strictEqual(enE.tgStatus, 'public');
     const goodAlert = live.find((a) => a.symbol === 'GOOD' && a.kind === 'momentum');
     const detG = await fetchJson(`http://127.0.0.1:${APP}/api/alert?id=${goodAlert.id}`);
     assert.ok(detG.enrich.alert.insiders && detG.enrich.alert.insiders.insidersDetected === 7 && detG.enrich.alert.insiders.lpLockedPct === 99.5);
@@ -511,6 +521,14 @@ async function extrasUnit() {
   const list = execFileSync('tar', ['-tzf', path.join(bdir, 'krypto-radar-dane-2026-10-10.tar.gz')]).toString();
   assert.ok(/config\.json/.test(list) && /state\.json/.test(list) && !/publish/.test(list) && !/tape/.test(list), list);
   assert.deepStrictEqual(fs.readdirSync(path.join(bdir, 'tape')), ['tape-2026-10-10.jsonl.gz']);
+  const { tgLinkKind } = require('../lib/sources');
+  const kinds = ['', 'https://t.me/+AbC123', 'https://t.me/joinchat/AAAA', 'https://telegram.me/somechan', 'https://t.me/s/somechan', 'https://t.me/somechan/123', '@somechan', 'tg://resolve?domain=somechan', 'https://t.me/addlist/xyz', 'https://t.me/pepe_buy_bot', 'https://example.com']
+    .map((l) => tgLinkKind(l).s);
+  assert.deepStrictEqual(kinds, ['none', 'private', 'private', 'public', 'public', 'public', 'public', 'public', 'folder', 'bot', 'invalid']);
+  const tgl = require('../lib/telegram').tgLine;
+  assert.strictEqual(tgl({ tg: { s: 'private' } }), '🔒 Telegram: prywatny (tylko link z zaproszeniem)');
+  assert.strictEqual(tgl({ tg: { s: 'none' } }), '➖ Telegram: brak');
+  assert.strictEqual(tgl({ tg: { s: 'public', type: 'group', title: 'A<b>', n: 12345 } }), '📢 Telegram: grupa „A&lt;b&gt;” – 12\u00a0345 członków'.replace('\\u00a0', '\u00a0'));
   console.log('✓ dane dodatkowe: rozkład transakcji, insiderzy, GoPlus, taśma, pilnowanie, kopia');
 }
 
