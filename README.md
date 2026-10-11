@@ -144,6 +144,42 @@ Token, który zniknął z DexScreenera, liczy się jako −100%. Pomiar wymaga d
 był wtedy wyłączony, pomiar jest oznaczony jako pominięty i nie wchodzi do statystyk. Poniżej około 30
 sprawdzonych alertów wynik niewiele mówi.
 
+## Dane dodatkowe, taśma, pilnowanie i kopia
+
+**Przy każdym alercie** zapisujemy dodatkowo:
+
+- **rynek**: BTC, ETH, SOL, BNB (zmiana 1 h i 24 h) i „temperaturę” memecoinów (narracje DexScreenera),
+- **średnią transakcję** (wolumen ÷ liczba transakcji) z 5 min, 1 h i 24 h,
+- **posiadaczy** (GeckoTerminal – dane w becie; dla sieci EVM także GoPlus) – liczbę przy alercie, zmianę
+  w czasie przed alertem (radar podgląda posiadaczy czołówki kandydatów co ~15 min) i po alercie (1 h, 24 h, 72 h, 7 dni),
+  oraz udział top 10 portfeli,
+- **insiderów, twórcę i płynność** – Solana: pełny raport RugCheck (wykryci insiderzy, sieci powiązanych portfeli,
+  udział insiderów wśród top posiadaczy, udział twórcy, zablokowana płynność); EVM: GoPlus (twórca, właściciel,
+  zablokowana płynność, podatki),
+- **rozkład transakcji** z ostatnich ~300 transakcji puli: średnia, mediana i 90. percentyl kupna, przedziały
+  (< $50, $50–500, $500–5 tys., ≥ $5 tys.), unikalni kupujący i sprzedający, udział 5 największych kupujących,
+  kupujący 3+ razy, saldo kupno − sprzedaż,
+- **członków kanału Telegram** tokena (publiczne kanały, przez Twojego bota) – przy alercie, przed i po,
+- **realne wejście** – cenę 2 i 5 minut po alercie.
+
+Dane, które wymagają dodatkowych zapytań, są dociągane w ciągu kilku minut po alercie, więc nie opóźniają go.
+Zapytania do GeckoTerminal mają budżet `gtPerMin` (domyślnie 9 na minutę) – gdy się wyczerpie, dodatkowe
+dane czekają do następnego skanu. Wszystko widać po rozwinięciu alertu na stronie i w eksporcie CSV.
+
+**Taśma** (`~/krypto-radar-dane/data/tape/`): co 5 minut skrócony stan wszystkich ocenianych tokenów – także tych
+bez alertu (grupa kontrolna, kandydaci spod progu). Pozwoli sprawdzać nowe reguły na przeszłości. Starsze dni są
+pakowane (ok. 2–4 MB na dobę). Ustawienia: `tape.enabled`, `tape.intervalMin`.
+
+**Pilnowanie**: jeśli źródło danych albo wysyłka na GitHuba nie działa od 30 minut, bot pisze o tym raz na Telegram,
+a potem jeszcze raz, gdy wróci do normy (`health.afterMin`). pump.fun zablokowany w Twoim regionie jest pomijany
+(sprawdzany raz na dobę) i nie świeci na czerwono.
+
+**Kopia danych**: codziennie po 4:00 (`backup.hour`) cały `~/krypto-radar-dane` (bez katalogu roboczego publikacji)
+trafia do `~/krypto-radar-kopie/krypto-radar-dane-RRRR-MM-DD.tar.gz`; trzymamy 14 ostatnich (`backup.keep`).
+Taśma jest kopiowana osobno do `~/krypto-radar-kopie/tape/` (każdy dzień raz). **Kopia na tej samej karcie SD nie
+chroni przed jej awarią** – ustaw `backup.dir` w `~/krypto-radar-dane/config.json` na pendrive albo dysk sieciowy
+i zrestartuj usługę.
+
 ## Jak powstaje wynik „gorące teraz”
 
 Momentum (0–100) to suma pięciu składników:
@@ -166,6 +202,7 @@ płynność i wolumen są powyżej minimów. O tym samym tokenie alert wraca naj
 - `lib/score.js` – reguły punktacji i progi flag, jeśli zechcesz je dostroić,
 - `lib/outcomes.js` – pomiar skuteczności alertów, `lib/calllog.js` – dziennik alertów i statystyki,
 - `lib/publish.js` – wysyłanie danych na GitHuba, `lib/tgbot.js` – komendy z Telegrama, `lib/auth.js` – hasło panelu lokalnego,
+- `lib/tape.js` – taśma skanów, `lib/health.js` – pilnowanie źródeł, `lib/backup.js` – kopia danych,
 - `deploy/` – skrypt instalacyjny (tworzy też usługę systemd),
 - `test/run.js` – test całości bez internetu: `node test/run.js`.
 
