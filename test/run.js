@@ -9,6 +9,7 @@ const { spawn, execFileSync } = require('child_process');
 const mock = require('./mock-apis');
 const { scoreToken, scoreEarly, scoreNft } = require('../lib/score');
 const outcomes = require('../lib/outcomes');
+const { CallLog } = require('../lib/calllog');
 const auth = require('../lib/auth');
 const sources = require('../lib/sources');
 
@@ -276,7 +277,29 @@ async function integration() {
     assert.deepStrictEqual(cfgNow.alerts.chains, ['solana', 'base']);
     assert.strictEqual(cfgNow.alerts.minScore, 75);
 
-    console.log('✓ całość: źródła, łączenie danych, flagi, alerty, publikacja na GitHub, komendy Telegram');
+    // Dziennik: pełny zapis alertów, bez sekretów; statystyki w danych strony; /wyniki i /eksport.
+    const logDir = path.join(dir, 'data', 'calls');
+    const logLines = fs.readdirSync(logDir).flatMap((f) => fs.readFileSync(path.join(logDir, f), 'utf8').trim().split('\n')).map((l) => JSON.parse(l));
+    const calls = logLines.filter((o) => o.t === 'call');
+    assert.deepStrictEqual(calls.map((c) => c.symbol).sort(), ['EARLY', 'GOOD']);
+    const ce = calls.find((c) => c.symbol === 'EARLY');
+    assert.ok(ce.id && ce.price > 0 && ce.liquidityUsd === 60000 && ce.early.parts.demand > 0 && ce.vol.h1 === 12000 && ce.uniq.h1.buyers === 70 && ce.settings.early.minScore === 45 && ce.threshold === 45, JSON.stringify(ce).slice(0, 300));
+    assert.ok(!JSON.stringify(logLines).includes('AAAAAAAAAAAA'));
+    const pub2 = JSON.parse(gitR('show', 'data:data.json'));
+    assert.ok(pub2.history && pub2.history.total === 2 && pub2.history.d1.kinds.early.n === 1, JSON.stringify(pub2.history && pub2.history.d1.kinds));
+    const nSent2 = (await fetch(base + '/__sent').then((r) => r.json())).length;
+    await tgSay(424242, '/wyniki 24h');
+    await tgSay(424242, '/eksport');
+    let docs = [];
+    for (let i = 0; i < 40 && !docs.length; i++) {
+      await sleep(250);
+      docs = await fetch(base + '/__docs').then((r) => r.json());
+    }
+    const wyn = (await fetch(base + '/__sent').then((r) => r.json())).slice(nSent2);
+    assert.ok(wyn.length && /Skuteczność – 24 h/.test(wyn[0].text) && /Wczesne<\/b> – 1 alertów/.test(wyn[0].text), wyn[0] && wyn[0].text);
+    assert.ok(docs.length === 1 && /krypto-radar-alerty-.*\.csv/.test(docs[0]) && /id;czas;rodzaj;symbol/.test(docs[0]) && /EARLY/.test(docs[0]));
+
+    console.log('✓ całość: źródła, łączenie danych, flagi, alerty, publikacja na GitHub, komendy Telegram, dziennik');
     console.log('\nPrzykładowy wczesny sygnał:\n' + earlyMsgs[0].text + '\n');
     if (process.argv.includes('--keep')) {
       console.log(`Aplikacja testowa działa na http://127.0.0.1:${APP} (Ctrl+C kończy)`);
@@ -288,6 +311,48 @@ async function integration() {
       srv.close();
     }
   }
+}
+
+// ---- Dziennik alertów ------------------------------------------------------
+function callLogUnit() {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'radar-log-'));
+  const L = new CallLog(dir);
+  const t0 = Date.UTC(2026, 9, 31, 23, 0); // alert w październiku, wyniki już w listopadzie
+  const call = (id, kind, score, chain) => L.append({ t: 'call', id, at: t0, type: 'token', kind, symbol: id.toUpperCase(), name: 'N;"x"', chain, score, risk: 'none', price: 1, sent: true, flags: [{ sev: 'warn', text: 'Niska płynność' }], vol: { h1: 1000 }, chg: { h1: 2 }, url: 'https://x/' + id });
+  call('a', 'early', 72, 'solana');
+  call('b', 'early', 52, 'solana');
+  call('c', 'momentum', 61, 'base');
+  const chk = (id, name, chg, extra) => L.append(Object.assign({ t: 'check', id, at: t0 + 3.6e6, name, chg, p: 1 + chg / 100 }, extra));
+  chk('a', 'h1', 20); chk('a', 'h6', 50); chk('a', 'h24', 100);
+  chk('b', 'h1', -10); chk('b', 'h6', -60); chk('b', 'h24', -100, { dead: true });
+  chk('c', 'h1', 5); L.append({ t: 'check', id: 'c', at: t0 + 7 * 3.6e6, name: 'h6', missed: true });
+  L.append({ t: 'done', id: 'a', at: t0 + 864e5, peakPct: 150, lowPct: -5, peakMin: 600 });
+  L.append({ t: 'done', id: 'b', at: t0 + 864e5, peakPct: 3, lowPct: -100, peakMin: 10 });
+  assert.deepStrictEqual(fs.readdirSync(dir).sort(), ['calls-2026-10.jsonl', 'calls-2026-11.jsonl']);
+  fs.appendFileSync(path.join(dir, 'calls-2026-11.jsonl'), '{"t":"check","id":"a", uszkodzon'); // przerwany zapis
+
+  const S = new CallLog(dir).summary(t0 + 2 * 864e5); // świeży odczyt z plików
+  const e = S.d7.kinds.early, m = S.d7.kinds.momentum;
+  assert.strictEqual(S.total, 3);
+  assert.deepStrictEqual([e.n, e.h1.up, e.h24.median, e.h24.big, e.h24.bad, e.dead], [2, 50, 0, 50, 50, 1]);
+  assert.deepStrictEqual([e.peak.n, e.peak.median, e.peak.p50], [2, 76.5, 50]);
+  assert.deepStrictEqual([m.n, m.h1.n, m.h6.n], [1, 1, 0], 'pominięty pomiar nie wchodzi do statystyk');
+  assert.deepStrictEqual(S.d7.buckets.early.map((b) => b.n), [0, 1, 0, 1]);
+  assert.strictEqual(S.d1.all.n, 0, 'alert sprzed 2 dni nie należy do „24 h”');
+  assert.deepStrictEqual(S.d7.chains.map((c) => [c.chain, c.n]), [['solana', 2], ['base', 1]]);
+
+  const csv = L.csv();
+  const lines = csv.replace(/^﻿/, '').trim().split('\r\n');
+  assert.strictEqual(lines.length, 4);
+  const head = lines[0].split(';');
+  const rowA = lines.find((l) => l.startsWith('a;'));
+  assert.ok(rowA.includes('"N;""x"""'), 'średnik i cudzysłów w nazwie muszą być w cudzysłowie');
+  const cols = rowA.replace('"N;""x"""', 'Q').split(';');
+  assert.strictEqual(cols[head.indexOf('zmiana po 24h %')], '100');
+  assert.strictEqual(cols[head.indexOf('szczyt 24h %')], '150');
+  assert.ok(lines.find((l) => l.startsWith('c;')).includes(';pominięty;'));
+  assert.ok(lines.find((l) => l.startsWith('b;')).includes(';tak;https://x/b'), 'zniknięty token oznaczony');
+  console.log('✓ dziennik alertów: zapis, wyniki, statystyki według okresu, wyniku i sieci, eksport CSV');
 }
 
 // ---- Logowanie, dozwolone adresy, nagłówki ----------------------------------
@@ -416,6 +481,7 @@ async function access() {
 
 (async () => {
   unit();
+  callLogUnit();
   await integration();
   await access();
 })().catch((e) => {
