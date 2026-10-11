@@ -18,7 +18,7 @@ function pair(o) {
     priceChange: { h1: o.c1, h6: o.c6, h24: o.c24 },
     ...(o.liq == null ? {} : { liquidity: { usd: o.liq, base: 1, quote: 1 } }),
     fdv: o.fdv, marketCap: o.fdv, pairCreatedAt: NOW - o.ageH * H,
-    ...(o.social ? { info: { imageUrl: 'https://example.com/i.png', websites: [{ url: 'https://example.com', label: 'Website' }], socials: [{ url: 'https://x.com/' + o.sym, type: 'twitter' }] } } : {}),
+    ...(o.social ? { info: { imageUrl: 'https://example.com/i.png', websites: [{ url: 'https://example.com', label: 'Website' }], socials: [{ url: 'https://x.com/' + o.sym, type: 'twitter' }, { url: 'https://t.me/' + o.sym.toLowerCase() + '_portal', type: 'telegram' }] } } : {}),
     ...(o.boost ? { boosts: { active: o.boost } } : {}),
   };
 }
@@ -57,6 +57,13 @@ const updates = [
   { update_id: 4, message: { chat: { id: 999, type: 'private', first_name: 'Obcy' }, text: 'halo' } },
 ];
 let failSends = 0;
+let tgCalls = 0;
+// Liczba posiadaczy rośnie z każdym zapytaniem – żeby test widział przyrost przed alertem.
+const holderAsks = new Map();
+const holderCount = (addr) => {
+  holderAsks.set(addr, (holderAsks.get(addr) || 0) + 1);
+  return 1000 + holderAsks.get(addr) * 25;
+};
 const docs = []; // pliki wysłane przez sendDocument (surowe ciało multipart) // ile kolejnych wiadomości Telegram ma „nie dojść”
 let osKeys = 0;
 
@@ -103,6 +110,29 @@ const routes = [
       ? [{ id: 'base_0xpoolearly', type: 'pool', attributes: { address: '0xpoolearly', locked_liquidity_percentage: '100.0', transactions: { m5: { buys: 8, sells: 4, buyers: 7, sellers: 3 }, h1: { buys: 90, sells: 50, buyers: 70, sellers: 30 } } }, relationships: {} }]
       : [],
   })],
+  // Kontekst rynku.
+  [/^\/cg\/coins\/markets$/, () => [
+    { id: 'bitcoin', current_price: 60000, price_change_percentage_1h_in_currency: 0.4, price_change_percentage_24h_in_currency: -1.2 },
+    { id: 'ethereum', current_price: 2500, price_change_percentage_1h_in_currency: 0.1, price_change_percentage_24h_in_currency: 2.5 },
+    { id: 'solana', current_price: 150, price_change_percentage_1h_in_currency: 1.25, price_change_percentage_24h_in_currency: 5.04 },
+    { id: 'binancecoin', current_price: 600, price_change_percentage_1h_in_currency: -0.2, price_change_percentage_24h_in_currency: 0 },
+  ]],
+  // Pełny raport RugCheck (Solana): posiadacze, insiderzy, twórca, płynność.
+  [/^\/rc\/v1\/tokens\/([^/]+)\/report$/, () => ({
+    totalHolders: 1234, graphInsidersDetected: 7, rugged: false, score_normalised: 12,
+    token: { supply: 1000000000 }, creatorBalance: 25000000,
+    topHolders: [{ pct: 10, insider: true }, { pct: 5 }, { pct: 4, insider: true }],
+    insiderNetworks: [{ size: 4 }, { size: 3 }],
+    markets: [{ lp: { lpLockedPct: 99.5 } }],
+  })],
+  // Posiadacze z GeckoTerminal (beta) i ostatnie transakcje puli.
+  [/^\/gt\/networks\/([^/]+)\/tokens\/([^/]+)\/info$/, (m) => ({ data: { attributes: { holders: { count: holderCount(m[2]), distribution_percentage: { top_10: '31.5', '11_30': '12', '31_50': '5', rest: '51.5' }, last_updated: '2026-10-11T12:00:00Z' } } } })],
+  [/^\/gt\/networks\/([^/]+)\/pools\/([^/]+)\/trades$/, () => ({ data: [
+    ...[20, 60, 120, 900, 6000, 30, 45].map((v, i) => ({ attributes: { kind: 'buy', volume_in_usd: String(v), tx_from_address: i < 3 ? 'w1' : 'w' + i, block_timestamp: new Date(Date.now() - i * 60e3).toISOString() } })),
+    ...[100, 300].map((v, i) => ({ attributes: { kind: 'sell', volume_in_usd: String(v), tx_from_address: 's' + i, block_timestamp: new Date(Date.now() - (10 + i) * 60e3).toISOString() } })),
+  ] })],
+  // Członkowie publicznego kanału Telegram.
+  [/^\/tg\/bot([^/]+)\/getChatMemberCount$/, (m, q) => ({ ok: true, result: 500 + (++tgCalls) * 10 })],
   [/^\/cg\/search\/trending$/, () => ({
     coins: [{ item: { id: 'roo', coin_id: 1, name: 'Roo', symbol: 'ROO', market_cap_rank: 900, thumb: 'https://example.com/r.png', data: { price_change_percentage_24h: { usd: -17.8 }, total_volume: '$1' } } }],
     nfts: [{ id: 'moonbirds', name: 'Moonbirds', symbol: 'MOONBIRD', floor_price_24h_percentage_change: 5.36, thumb: 'https://example.com/m.png', data: { floor_price: '0.42 ETH', h24_volume: '6.05 ETH' } }],
