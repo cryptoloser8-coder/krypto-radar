@@ -16,6 +16,7 @@ const sources = require('../lib/sources');
 const MOCK = 9911, APP = 9912;
 const near = (a, b, eps = 0.11) => assert.ok(Math.abs(a - b) <= eps, `oczekiwano ~${b}, jest ${a}`);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const fetchJson = (u) => fetch(u).then((r) => r.json());
 
 function unit() {
   const now = Date.now();
@@ -102,8 +103,11 @@ function unit() {
   const al = [mk('up'), mk('gone'), mk('rug'), mk('off')];
   const world = (price) => new Map([['up', { priceUsd: price, liquidityUsd: 50000 }], ['rug', { priceUsd: 0.1, liquidityUsd: 2000 }]]);
   const askedAll = new Set(['up', 'gone', 'rug']); // „off” nie był odpytywany – jakby aplikacja nie działała
-  outcomes.track(al, world(1.5), askedAll, T0 + 30 * 60e3);         // przed terminem: tylko szczyt
-  assert.deepStrictEqual(al[0].checks, {});
+  outcomes.track(al, world(1.3), askedAll, T0 + 2.5 * 60e3);        // cena 2 min po alercie (realne wejście)
+  assert.deepStrictEqual([al[0].checks.m2.chg, al[0].checks.m5], [30, undefined]);
+  outcomes.track(al, world(1.5), askedAll, T0 + 30 * 60e3);         // przed terminem 1 h: tylko szczyt
+  assert.strictEqual(al[0].checks.m5.missed, true, 'okno 5 min minęło bez skanu');
+  assert.deepStrictEqual(Object.keys(al[0].checks).filter((k) => k[0] === 'h'), []);
   assert.strictEqual(al[0].peak, 1.5);
   for (const m of [61, 62, 63]) outcomes.track(al, world(1.2), askedAll, T0 + m * 60e3);
   assert.strictEqual(al[0].checks.h1.chg, 20);                       // +20% po godzinie
@@ -143,7 +147,7 @@ async function integration() {
   const bare = path.join(dir, 'remote.git');
   execFileSync('git', ['init', '-q', '--bare', bare]);
   fs.writeFileSync(path.join(dir, 'config.json'), JSON.stringify({
-    port: APP, scanIntervalSec: 20, nftIntervalSec: 1,
+    port: APP, scanIntervalSec: 20, nftIntervalSec: 1, gtPerMin: 100,
     publish: { enabled: true, repo: bare, branch: 'data', intervalSec: 60 },
     telegram: { token: '123456789:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA', chatId: '', pairCode: '123456' },
     api: { dexscreener: base + '/ds', geckoterminal: base + '/gt', coingecko: base + '/cg', pumpfun: base + '/pf', opensea: base + '/os', rugcheck: base + '/rc', goplus: base + '/gp', telegram: base + '/tg' },
@@ -242,6 +246,23 @@ async function integration() {
     const live = A.live.alerts;
     const logged = live.find((a) => a.kind === 'early' && a.symbol === 'EARLY');
     assert.ok(logged && logged.price0 > 0 && logged.id && logged.pair === undefined, 'wiersz listy bez zbędnych pól');
+
+    // Dane dodatkowe przy alercie: rynek, średnia transakcja, posiadacze i członkowie Telegrama (także przed alertem),
+    // a po alercie posiadacze, transakcje, insiderzy (Solana) i członkowie – dociągane bez opóźniania alertu.
+    const detE = await fetchJson(`http://127.0.0.1:${APP}/api/alert?id=${logged.id}`);
+    assert.deepStrictEqual([detE.d.market.sol.h1, detE.d.market.btc.h24], [1.3, -1.2]);
+    assert.ok(detE.d.avgTx && detE.d.avgTx.h1 > 0 && detE.d.holdersPre && detE.d.holdersPre.count > 1000 && detE.d.tgLink === 'https://t.me/early_portal', JSON.stringify(detE.d).slice(0, 400));
+    const enE = detE.enrich && detE.enrich.alert;
+    assert.ok(enE && enE.holders.count > 1000 && enE.holders.top10 === 31.5 && enE.trades.n === 9 && enE.trades.whales === 1 && enE.tgMembers > 500, JSON.stringify(detE.enrich));
+    const goodAlert = live.find((a) => a.symbol === 'GOOD' && a.kind === 'momentum');
+    const detG = await fetchJson(`http://127.0.0.1:${APP}/api/alert?id=${goodAlert.id}`);
+    assert.ok(detG.enrich.alert.insiders && detG.enrich.alert.insiders.insidersDetected === 7 && detG.enrich.alert.insiders.lpLockedPct === 99.5);
+    assert.ok(detG.d.secInfo && detG.d.secInfo.src === 'rugcheck', 'dane z kontroli RugCheck w obrazie alertu');
+    // Taśma: zapis wszystkich ocenianych tokenów, z oznaczeniem tych z alertem.
+    const tapeFiles = fs.readdirSync(path.join(dir, 'data', 'tape'));
+    const tapeRec = JSON.parse(fs.readFileSync(path.join(dir, 'data', 'tape', tapeFiles[0]), 'utf8').trim().split('\n')[0]);
+    assert.ok(tapeRec.tokens.length >= 5 && tapeRec.market && tapeRec.tokens.some((t) => t.s === 'EARLY' && t.al === 'e') && tapeRec.tokens.some((t) => t.s === 'RUG'), 'taśma: ' + tapeRec.tokens.map((t) => t.s));
+    assert.strictEqual(st.appVersion > 0 && st.market.sol.h1, 1.3);
 
     // Pomiar skuteczności: alert sprzed 61 min po połowie ceny → +100% po 1 h; nieznany token → zniknął.
     const seeded = live.find((a) => a.at === seedAt);
@@ -345,7 +366,7 @@ async function integration() {
     }
     const wyn = (await fetch(base + '/__sent').then((r) => r.json())).slice(nSent2);
     assert.ok(wyn.length && /Skuteczność – 24 h/.test(wyn[0].text) && /Wczesne<\/b> – 3 alertów/.test(wyn[0].text), wyn[0] && wyn[0].text);
-    assert.ok(docs.length === 1 && /krypto-radar-alerty-.*\.csv/.test(docs[0]) && /id;czas;rodzaj;symbol/.test(docs[0]) && /EARLY/.test(docs[0]));
+    assert.ok(docs.length === 1 && /krypto-radar-alerty-.*\.csv/.test(docs[0]) && /id;czas;rodzaj;symbol/.test(docs[0]) && /EARLY/.test(docs[0]) && /posiadacze przy alercie/.test(docs[0]));
 
     console.log('✓ całość: źródła, łączenie danych, flagi, alerty, publikacja na GitHub, komendy Telegram, dziennik');
     console.log('\nPrzykładowy wczesny sygnał:\n' + earlyMsgs[0].text + '\n');
@@ -421,8 +442,76 @@ function callLogUnit() {
   assert.strictEqual(cols[head.indexOf('szczyt do 24h %')], '150');
   assert.strictEqual(cols[head.indexOf('szczyt do 72h %')], '400');
   assert.ok(lines.find((l) => l.startsWith('c;')).includes(';pominięty;'));
-  assert.ok(lines.find((l) => l.startsWith('b;')).includes(';tak;https://x/b'), 'zniknięty token oznaczony');
+  const colsB = lines.find((l) => l.startsWith('b;')).replace('"N;""x"""', 'Q').split(';');
+  assert.deepStrictEqual([colsB[head.indexOf('zniknął')], colsB[head.indexOf('wykres')]], ['tak', 'https://x/b'], 'zniknięty token oznaczony');
   console.log('✓ dziennik alertów: zapis, wyniki, statystyki według okresu, wyniku i sieci, eksport CSV');
+}
+
+// ---- Dane dodatkowe: transakcje, insiderzy, GoPlus, taśma, pilnowanie, kopia ----
+async function extrasUnit() {
+  const sources = require('../lib/sources');
+  const { goplusInfo } = require('../lib/security');
+  const { Tape } = require('../lib/tape');
+  const { Health } = require('../lib/health');
+  const { backup } = require('../lib/backup');
+  const zlib = require('zlib');
+
+  // Rozkład transakcji: 7 kupna (portfel w1 kupuje 3 razy), 2 sprzedaże.
+  const now = Date.now();
+  const mkT = (kind, usd, from, minAgo) => ({ attributes: { kind, volume_in_usd: String(usd), tx_from_address: from, block_timestamp: new Date(now - minAgo * 60e3).toISOString() } });
+  const tr = sources.tradesSummary([mkT('buy', 20, 'w1', 0), mkT('buy', 60, 'w1', 1), mkT('buy', 120, 'w1', 2), mkT('buy', 900, 'w3', 3), mkT('buy', 6000, 'w4', 4), mkT('buy', 30, 'w5', 5), mkT('buy', 45, 'w6', 6), mkT('sell', 100, 's0', 10), mkT('sell', 300, 's1', 11)], now);
+  assert.deepStrictEqual([tr.n, tr.buy.n, tr.buy.sum, tr.buy.med, tr.whales, tr.uniqueBuyers, tr.repeatBuyers, tr.top5Share, tr.netUsd, tr.spanMin], [9, 7, 7175, 60, 1, 5, 1, 100, 6775, 11]);
+  assert.deepStrictEqual(tr.bucketsBuy, [3, 2, 1, 1]);
+  assert.strictEqual(sources.tradesSummary([], now), null);
+
+  // RugCheck: insiderzy, twórca, płynność; brak pól nie wywraca odczytu.
+  const rc = sources.rugcheckInfo({ totalHolders: 1234, graphInsidersDetected: 7, token: { supply: 1e9 }, creatorBalance: 2.5e7, topHolders: [{ pct: 10, insider: true }, { pct: 5 }, { pct: 4, insider: true }], insiderNetworks: [{ size: 4 }, { size: 3 }], markets: [{ lp: { lpLockedPct: 99.5 } }, { lp: { lpLockedPct: 20 } }] });
+  assert.deepStrictEqual([rc.holders, rc.top10Pct, rc.insiderPctTop, rc.insiderHoldersTop, rc.insidersDetected, rc.insiderNetworks, rc.creatorPct, rc.lpLockedPct], [1234, 19, 14, 2, 7, 2, 2.5, 99.5]);
+  assert.deepStrictEqual(Object.values(sources.rugcheckInfo({})).filter((v) => v != null && v !== false && !(Array.isArray(v) && !v.length) && v !== 0), []);
+
+  // GoPlus: posiadacze, twórca, zablokowana płynność – z tej samej odpowiedzi co flagi.
+  const gp = goplusInfo({ holder_count: '842', creator_percent: '0.051', owner_percent: '0', buy_tax: '0.01', sell_tax: '0.05', lp_holder_count: '3', lp_holders: [{ percent: '0.9', is_locked: 1 }, { percent: '0.05', address: '0x000000000000000000000000000000000000dead' }, { percent: '0.05' }], holders: [{ percent: '0.2' }, { percent: '0.1', is_contract: 1 }] });
+  assert.deepStrictEqual([gp.holders, gp.creatorPct, gp.ownerPct, gp.lpLockedPct, gp.buyTax, gp.sellTax, gp.top10Pct], [842, 5.1, 0, 95, 1, 5, 20]);
+
+  // Taśma: wczorajszy plik jest pakowany przy pierwszym zapisie nowego dnia, odczyt czyta oba.
+  const tdir = fs.mkdtempSync(path.join(os.tmpdir(), 'radar-tape-'));
+  const T = new Tape(tdir);
+  const tok = { key: 'solana:X', symbol: 'X', chain: 'solana', priceUsd: 0.0012345678, liquidityUsd: 50000.4, marketCap: 1e6, vol: { m5: 1, h1: 2, h6: 3, h24: 4 }, txns: { m5: { buys: 1, sells: 2 }, h1: { buys: 3, sells: 4 }, h24: { buys: 5, sells: 6 } }, chg: { m5: 1.23, h1: 2, h6: 3, h24: 4 }, s: { score: 61.26, momentum: 70, risk: 'med', parts: { ageH: 5.55 }, flags: [{ sev: 'warn', code: 'liq-low' }, { sev: 'info', code: 'new' }] }, e: { score: 50, raw: 55, inScope: true }, sources: ['gt-trending'], security: 'checked', holders: 900, alerted: 'e' };
+  const day1 = Date.UTC(2026, 9, 10, 23, 58), day2 = Date.UTC(2026, 9, 11, 0, 3);
+  T.write(day1, [tok], { sol: { h1: 1 } });
+  T.write(day2, [tok, tok], null);
+  assert.deepStrictEqual(fs.readdirSync(tdir).sort(), ['tape-2026-10-10.jsonl.gz', 'tape-2026-10-11.jsonl']);
+  const rec = [...T.read()];
+  assert.deepStrictEqual([rec.length, rec[0].market.sol.h1, rec[1].tokens.length], [2, 1, 2]);
+  const c0 = rec[0].tokens[0];
+  assert.deepStrictEqual([c0.k, c0.p, c0.l, c0.t1, c0.sc, c0.in, c0.f, c0.h, c0.al, c0.a], ['solana:X', 0.00123457, 50000, [3, 4], 61.3, 1, ['liq-low'], 900, 'e', 5.6]);
+
+  // Pilnowanie: wiadomość po 30 min awarii i po powrocie, nie wcześniej.
+  const H = new Health({ afterMin: 30 });
+  const t0 = 1e12;
+  assert.strictEqual(H.check([{ name: 'A', ok: false, error: 'HTTP 500' }], t0).length, 0);
+  assert.strictEqual(H.check([{ name: 'A', ok: false, error: 'HTTP 500' }], t0 + 29 * 60e3).length, 0);
+  const down = H.check([{ name: 'A', ok: false, error: 'HTTP 500' }], t0 + 31 * 60e3);
+  assert.ok(down.length === 1 && /nie działa od 31 min/.test(down[0]));
+  assert.strictEqual(H.check([{ name: 'A', ok: false }], t0 + 40 * 60e3).length, 0, 'tylko raz');
+  assert.ok(/znowu działa/.test(H.check([{ name: 'A', ok: true }], t0 + 50 * 60e3)[0]));
+  assert.strictEqual(H.check([{ name: 'B', ok: false }], t0).length + H.check([{ name: 'B', ok: true }], t0 + 60e3).length, 0, 'krótka przerwa bez wiadomości');
+
+  // Kopia: bez katalogu publikacji i bez taśmy (taśma kopiowana osobno), rotacja do `keep`.
+  const src = fs.mkdtempSync(path.join(os.tmpdir(), 'radar-src-'));
+  fs.mkdirSync(path.join(src, 'data', 'publish'), { recursive: true });
+  fs.mkdirSync(path.join(src, 'data', 'tape'), { recursive: true });
+  fs.writeFileSync(path.join(src, 'config.json'), '{}');
+  fs.writeFileSync(path.join(src, 'data', 'state.json'), '{}');
+  fs.writeFileSync(path.join(src, 'data', 'publish', 'data.json'), '{}');
+  fs.writeFileSync(path.join(src, 'data', 'tape', 'tape-2026-10-10.jsonl.gz'), zlib.gzipSync('x'));
+  const bdir = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'radar-bk-')), 'kopie');
+  for (const d of [8, 9, 10]) await backup(src, bdir, 2, new Date(Date.UTC(2026, 9, d, 4)));
+  assert.deepStrictEqual(fs.readdirSync(bdir).sort(), ['krypto-radar-dane-2026-10-09.tar.gz', 'krypto-radar-dane-2026-10-10.tar.gz', 'tape']);
+  const list = execFileSync('tar', ['-tzf', path.join(bdir, 'krypto-radar-dane-2026-10-10.tar.gz')]).toString();
+  assert.ok(/config\.json/.test(list) && /state\.json/.test(list) && !/publish/.test(list) && !/tape/.test(list), list);
+  assert.deepStrictEqual(fs.readdirSync(path.join(bdir, 'tape')), ['tape-2026-10-10.jsonl.gz']);
+  console.log('✓ dane dodatkowe: rozkład transakcji, insiderzy, GoPlus, taśma, pilnowanie, kopia');
 }
 
 // ---- Logowanie, dozwolone adresy, nagłówki ----------------------------------
@@ -487,7 +576,7 @@ async function access() {
     const page = await req('/', { headers: jar });
     assert.strictEqual(page.status, 200);
     assert.ok(/script-src 'self'/.test(page.headers.get('content-security-policy')) && page.headers.get('x-frame-options') === 'DENY');
-    assert.ok(/<script src="app.js">/.test(await page.text()));
+    assert.ok(/<script src="app.js\?v=\d+">/.test(await page.text()));
     assert.strictEqual((await req('/app.js', { headers: jar })).status, 200);
     assert.strictEqual((await req('/app.js')).status, 401, 'skrypt panelu też tylko po zalogowaniu');
     assert.strictEqual((await req('/api/state', { headers: { cookie: jar.cookie.slice(0, -3) + 'abc' } })).status, 401);
@@ -554,6 +643,7 @@ async function access() {
   unit();
   pathUnit();
   callLogUnit();
+  await extrasUnit();
   await integration();
   await access();
 })().catch((e) => {
