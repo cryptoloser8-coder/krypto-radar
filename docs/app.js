@@ -1,7 +1,7 @@
 'use strict';
 const $ = (id) => document.getElementById(id);
 // Musi się zgadzać z APP_VERSION w server.js – inaczej strona prosi o odświeżenie albo aktualizację Orange Pi.
-const APP_VERSION = 10;
+const APP_VERSION = 11;
 function el(tag, attrs, ...kids) {
   const n = document.createElement(tag);
   for (const k in attrs || {}) {
@@ -47,9 +47,13 @@ const PARTS = [['vol', 'Przyspieszenie wolumenu', 28], ['act', 'Aktywność', 20
 
 // [klucz, nazwa, maksimum, kolor]
 const EPARTS = [['demand', 'Rosnący popyt', 30, 'vol'], ['buyers', 'Kupujący', 20, 'buy'], ['room', 'Zapas ceny', 20, 'price'], ['value', 'Wycena', 15, 'act'], ['fresh', 'Świeżość', 15, 'attn']];
-const isEarly = () => ui.tab === 'early';
+// Solana osobno: własna zakładka (z podwidokami), a w pozostałych zakładkach jej nie ma.
+const solApart = () => !!(S && S.config && (!S.config.solana || S.config.solana.separate !== false));
+const isSol = () => ui.tab === 'sol';
+const inScope = (chain) => (!solApart() ? true : isSol() ? chain === 'solana' : chain !== 'solana');
+const isEarly = () => ui.tab === 'early' || (isSol() && ui.solView === 'early');
 
-const ui = { tab: 'early', q: '', chain: '', minLiq: 0, hideCrit: true, sort: 'score', meta: '', open: new Set(), openAlerts: new Set(), upMin: null, downMin: null, settingsBuilt: false };
+const ui = { tab: 'early', solView: 'early', q: '', chain: '', minLiq: 0, hideCrit: true, sort: 'score', meta: '', open: new Set(), openAlerts: new Set(), upMin: null, downMin: null, settingsBuilt: false };
 let S = null;
 
 // ---- Skąd dane -------------------------------------------------------------
@@ -108,7 +112,7 @@ async function load() {
     $('scanNow').hidden = !!REMOTE;
     if (document.activeElement && document.activeElement.tagName === 'SELECT') renderTop();
     else render();
-    if (ui.tab === 'alerts') loadAlerts();
+    if (ui.tab === 'alerts' || (isSol() && ui.solView === 'alerts')) loadAlerts();
   } catch (e) {
     $('when').textContent = REMOTE
       ? (/Brak danych/.test(e.message) ? e.message : 'Nie udało się pobrać danych z GitHuba – spróbuję ponownie za chwilę.')
@@ -125,17 +129,42 @@ function render() {
   }
   renderTop();
   renderTopics();
-  $('ctEarly').textContent = S.tokens.filter((t) => t.e && t.e.inScope).length || '';
-  $('ctTokens').textContent = S.tokens.length || '';
+  const apart = solApart();
+  const main = S.tokens.filter((t) => !apart || t.chain !== 'solana');
+  if (!apart && isSol()) ui.tab = 'early';
+  $('tabSol').hidden = !apart;
+  // pump.fun to Solana – przy osobnej Solanie jest jej podwidokiem.
+  document.querySelector('.tab[data-tab="pump"]').hidden = apart;
+  if (apart && ui.tab === 'pump') { ui.tab = 'sol'; ui.solView = 'pump'; }
+  $('ctEarly').textContent = main.filter((t) => t.e && t.e.inScope).length || '';
+  $('ctTokens').textContent = main.length || '';
   $('ctPump').textContent = S.tokens.filter((t) => t.isPump).length || '';
+  $('ctSol').textContent = (S.alertsCount && S.alertsCount.sol) || '';
   $('ctNft').textContent = S.nfts.length || '';
   $('ctAlerts').textContent = (S.alertsCount && S.alertsCount.day) || '';
+  renderSolBar();
   for (const b of document.querySelectorAll('.tab')) b.setAttribute('aria-selected', String(b.dataset.tab === ui.tab));
   if (ui.tab === 'settings') return renderSettings();
   ui.settingsBuilt = false;
   if (ui.tab === 'nft') return renderNfts();
-  if (ui.tab === 'alerts') return renderAlerts();
+  if (ui.tab === 'alerts' || (isSol() && ui.solView === 'alerts')) return renderAlerts();
   renderTokens();
+}
+
+// Podwidoki zakładki Solana.
+function renderSolBar() {
+  const bar = $('solbar');
+  bar.hidden = !isSol();
+  if (!isSol()) return bar.replaceChildren();
+  const sol = S.tokens.filter((t) => t.chain === 'solana');
+  const muted = !(S.config.solana && S.config.solana.telegram);
+  const chip = (v, label) => el('button', { class: 'topic', 'aria-pressed': String(ui.solView === v), style: 'padding:4px 12px', onclick: () => { ui.solView = v; render(); if (v === 'alerts') loadAlerts(); } }, el('div', { class: 'nm', text: label }));
+  bar.replaceChildren(
+    chip('early', `Wczesne sygnały (${sol.filter((t) => t.e && t.e.inScope).length})`),
+    chip('tokens', `Gorące teraz (${sol.length})`),
+    chip('pump', `pump.fun (${sol.filter((t) => t.isPump).length})`),
+    chip('alerts', `Alerty (${(S.alertsCount && S.alertsCount.sol) || 0} w 24 h)`),
+    el('span', { class: 'mute', style: 'font-size:13px', text: muted ? 'Powiadomienia Solany na Telegram wyłączone – alerty zapisywane i mierzone w tle (włączysz: /ustaw solana_tg wł.).' : 'Powiadomienia Solany na Telegram włączone.' }));
 }
 
 function versionNote() {
@@ -176,7 +205,7 @@ function renderTopics() {
   $('metas').replaceChildren(
     ...(metas.length
       ? metas.map((m) => {
-          const b = el('button', { class: 'topic', 'aria-pressed': String(ui.meta === m.slug), title: m.description || '', onclick: () => { ui.meta = ui.meta === m.slug ? '' : m.slug; if (!['early', 'tokens', 'pump'].includes(ui.tab)) ui.tab = 'early'; render(); } },
+          const b = el('button', { class: 'topic', 'aria-pressed': String(ui.meta === m.slug), title: m.description || '', onclick: () => { ui.meta = ui.meta === m.slug ? '' : m.slug; if (!['early', 'tokens', 'pump', 'sol'].includes(ui.tab)) ui.tab = 'early'; if (isSol() && ui.solView === 'alerts') ui.solView = 'early'; render(); } },
             el('div', { class: 'nm', text: (m.icon ? m.icon + ' ' : '') + m.name }),
             el('div', { class: 'sub' }, '6 h ', pct(m.chg.h6), ' | 24 h ', pct(m.chg.h24), ' | obrót ' + usd(m.volume)));
           return b;
@@ -190,8 +219,8 @@ function renderTopics() {
 }
 
 function filteredTokens() {
-  let list = S.tokens.slice();
-  if (ui.tab === 'pump') list = list.filter((t) => t.isPump);
+  let list = S.tokens.filter((t) => inScope(t.chain));
+  if (ui.tab === 'pump' || (isSol() && ui.solView === 'pump')) list = list.filter((t) => t.isPump);
   if (isEarly()) list = list.filter((t) => t.e && t.e.inScope);
   if (ui.meta) list = list.filter((t) => (t.metas || []).some((m) => m.slug === ui.meta));
   if (ui.chain) list = list.filter((t) => t.chain === ui.chain);
@@ -295,7 +324,8 @@ function tokenDetail(t) {
 function renderTokens() {
   const view = $('view');
   const early = isEarly();
-  const chains = [...new Set(S.tokens.map((t) => t.chain))].sort();
+  const chains = [...new Set(S.tokens.filter((t) => inScope(t.chain)).map((t) => t.chain))].sort();
+  if (ui.chain && !chains.includes(ui.chain)) ui.chain = '';
   const list = filteredTokens();
   const sel = (id, opts, val, on) => el('select', { id, onchange: (e) => { on(e.target.value); render(); } }, opts.map(([v, t]) => el('option', { value: v, selected: String(v) === String(val), text: t })));
   const focusQ = document.activeElement && document.activeElement.id === 'q';
@@ -396,7 +426,7 @@ const WIN_MS = { h1: 3.6e6, h24: 864e5, h72: 3 * 864e5, d7: 7 * 864e5 };
 function alertRows() {
   const byId = new Map();
   for (const r of (ALERTS && ALERTS.index && ALERTS.index.rows) || []) {
-    byId.set(r.id, { id: r.id, at: r.at, type: r.t === 'n' ? 'nft' : 'token', kind: r.t === 'e' ? 'early' : 'momentum', symbol: r.s, chain: r.c, score: r.sc, risk: r.r, price0: r.p0, sent: !!r.se, x: r.x || {} });
+    byId.set(r.id, { id: r.id, at: r.at, type: r.t === 'n' ? 'nft' : 'token', kind: r.t === 'e' ? 'early' : 'momentum', symbol: r.s, chain: r.c, score: r.sc, risk: r.r, price0: r.p0, sent: !!r.se, muted: !!r.mu, x: r.x || {} });
   }
   for (const a of (ALERTS && ALERTS.live && ALERTS.live.alerts) || []) {
     const x = {};
@@ -404,7 +434,7 @@ function alertRows() {
       const c = a.checks && a.checks[w];
       if (c) x[w] = c.missed ? ['m'] : [c.chg, c.pk ?? null, c.lo ?? null, c.dead ? 'd' : c.rug ? 'r' : c.approx ? 'a' : ''];
     }
-    byId.set(a.id || a.at + a.symbol, Object.assign({}, byId.get(a.id) || {}, { id: a.id, at: a.at, type: a.type, kind: a.kind || 'momentum', symbol: a.symbol, chain: a.chain, score: a.score, risk: a.risk, price0: a.price0, sent: a.sent, error: a.error, x, live: a }));
+    byId.set(a.id || a.at + a.symbol, Object.assign({}, byId.get(a.id) || {}, { id: a.id, at: a.at, type: a.type, kind: a.kind || 'momentum', symbol: a.symbol, chain: a.chain, score: a.score, risk: a.risk, price0: a.price0, sent: a.sent, muted: !!a.muted, error: a.error, x, live: a }));
   }
   return [...byId.values()].sort((a, b) => b.at - a.at);
 }
@@ -442,7 +472,7 @@ function alertTable(rows, mode) {
       el('td', { text: r.type === 'nft' ? '–' : price(r.price0) }),
       WINS.map(([w]) => el('td', null, winCell(r, w, mode))),
       el('td', null, peak24 != null && r.type !== 'nft' ? pct(peak24) : el('span', { class: 'mute', text: '–' })),
-      el('td', { class: 'l', style: 'font-family:var(--ui);font-size:13px' }, el('span', { class: r.sent ? 'up' : 'mute', text: r.sent ? 'wysłano' : r.error || 'nie wysłano' }))));
+      el('td', { class: 'l', style: 'font-family:var(--ui);font-size:13px' }, el('span', { class: r.sent ? 'up' : 'mute', text: r.sent ? 'wysłano' : r.muted ? 'wyciszony' : r.error || 'nie wysłano', title: r.muted ? 'Solana bez powiadomień – alert tylko zapisany i mierzony' : '' }))));
     if (open) body.push(el('tr', { class: 'detail' }, el('td', { colspan: '11' }, detailFor(r))));
   }
   return el('div', { class: 'tablewrap' }, el('table', null,
@@ -455,7 +485,8 @@ function renderAlerts() {
   ui.alertKind = ui.alertKind || '';
   ui.ovMode = ui.ovMode || 'chg';
   ui.ovWin = ui.ovWin || 'h24';
-  const all = alertRows();
+  const all = alertRows().filter((r) => (r.type === 'nft' ? !isSol() : inScope(r.chain)));
+  if (isSol() && ui.alertKind === 'nft') ui.alertKind = '';
   const mode = ui.ovMode;
   const kindOk = (r) => !ui.alertKind || (ui.alertKind === 'nft' ? r.type === 'nft' : r.type !== 'nft' && r.kind === ui.alertKind);
   const chainCounts = new Map();
@@ -515,8 +546,8 @@ function renderAlerts() {
     return [chip(cur == null, 'bez progu', () => { ui[key] = null; render(); }), ...presets.map((p) => chip(cur === p, `${sign}${p}%`, () => { ui[key] = p; render(); })), input, el('span', { class: 'mute', text: '%' })];
   };
   const controls = el('div', { class: 'ovctl' },
-    el('div', { class: 'filters' }, el('span', { class: 'ovlbl', text: 'Rodzaj' }), chip(ui.alertKind === '', 'Wszystkie', () => { ui.alertKind = ''; render(); }), chip(ui.alertKind === 'early', 'Wczesne', () => { ui.alertKind = 'early'; render(); }), chip(ui.alertKind === 'momentum', 'Gorące', () => { ui.alertKind = 'momentum'; render(); }), chip(ui.alertKind === 'nft', 'NFT', () => { ui.alertKind = 'nft'; render(); })),
-    el('div', { class: 'filters' }, el('span', { class: 'ovlbl', text: 'Sieć' }),
+    el('div', { class: 'filters' }, el('span', { class: 'ovlbl', text: 'Rodzaj' }), chip(ui.alertKind === '', 'Wszystkie', () => { ui.alertKind = ''; render(); }), chip(ui.alertKind === 'early', 'Wczesne', () => { ui.alertKind = 'early'; render(); }), chip(ui.alertKind === 'momentum', 'Gorące', () => { ui.alertKind = 'momentum'; render(); }), isSol() ? null : chip(ui.alertKind === 'nft', 'NFT', () => { ui.alertKind = 'nft'; render(); })),
+    isSol() ? null : el('div', { class: 'filters' }, el('span', { class: 'ovlbl', text: 'Sieć' }),
       chip(!ui.alertChain, 'Wszystkie', () => { ui.alertChain = ''; render(); }),
       [...chainCounts].sort((a, b) => b[1] - a[1]).map(([c, n]) => chip(ui.alertChain === c, `${c} (${n})`, () => { ui.alertChain = c; render(); }))),
     el('div', { class: 'filters' }, el('span', { class: 'ovlbl', text: 'Licz' }),
@@ -543,7 +574,7 @@ function renderAlerts() {
   const sortSel = el('label', { class: 'mute', style: 'display:inline-flex;gap:6px;align-items:center;font-size:13px' }, 'Sortuj listy:',
     el('select', { onchange: (e) => { ui.alertSort = e.target.value; render(); } }, [['time', 'najnowsze'], ['score', 'wynik'], ['chain', 'sieć'], ['h24', 'zmiana po 24 h'], ['peak', 'szczyt 24 h']].map(([v, t]) => el('option', { value: v, selected: ui.alertSort === v, text: t }))));
   put(view,
-    el('h2', { class: 'ovsec', text: 'Skuteczność alertów z ostatnich 30 dni' + (ui.alertChain ? ` – ${ui.alertChain}` : '') }),
+    el('h2', { class: 'ovsec', text: 'Skuteczność alertów z ostatnich 30 dni' + (isSol() ? ' – Solana' : solApart() ? ' (bez Solany)' : '') + (ui.alertChain && !isSol() ? ` – ${ui.alertChain}` : '') }),
     controls,
     el('div', { class: 'ovgrid' }, cards),
     el('p', { class: 'mute', style: 'margin:6px 0 14px;font-size:13px;max-width:92ch', text: (mode === 'chg'
@@ -755,7 +786,7 @@ async function loadAlerts() {
   } catch (e) {
     // pliki jeszcze nie istnieją (starsza wersja na Orange Pi) – spróbujemy przy następnym odświeżeniu
   }
-  if (ui.tab === 'alerts' && S) render();
+  if (S && (ui.tab === 'alerts' || (isSol() && ui.solView === 'alerts'))) render();
 }
 
 // Szczegóły jednego alertu pobieramy dopiero po jego rozwinięciu.
@@ -772,7 +803,7 @@ async function loadDetail(id) {
   } catch (e) {
     DETAILS.delete(id);
   }
-  if (ui.tab === 'alerts') render();
+  if (ui.tab === 'alerts' || (isSol() && ui.solView === 'alerts')) render();
 }
 
 function detailFor(r) {
@@ -919,7 +950,7 @@ function updateTgStatus() {
   else { p.textContent = 'Bot nie jest jeszcze podłączony.'; p.className = 'mute'; }
 }
 
-for (const b of document.querySelectorAll('.tab')) b.addEventListener('click', () => { ui.tab = b.dataset.tab; if (S) render(); if (ui.tab === 'alerts' && S) loadAlerts(); });
+for (const b of document.querySelectorAll('.tab')) b.addEventListener('click', () => { ui.tab = b.dataset.tab; if (S) render(); if (S && (ui.tab === 'alerts' || (isSol() && ui.solView === 'alerts'))) loadAlerts(); });
 $('srcToggle').addEventListener('click', () => { const open = $('sources').classList.toggle('open'); $('srcToggle').setAttribute('aria-expanded', String(open)); });
 $('logout').addEventListener('click', async () => { try { await fetch('/logout', { method: 'POST' }); } catch (e) {} location.href = '/login'; });
 $('scanNow').addEventListener('click', async () => { $('scanNow').disabled = true; try { await post('/api/scan'); } catch (e) {} setTimeout(load, 1500); });
