@@ -59,6 +59,8 @@ Orange Pi był wyłączony, przepadają po 10 minutach (nie wykonają się z op�
 |---|---|
 | `/status` | stan radaru, czołówka wczesnych i gorących, liczba alertów z 24 h |
 | `/skanuj` | skan od razu (strona zaktualizuje się zaraz po nim) |
+| `/wyniki` | skuteczność alertów, np. `/wyniki 7d`, `/wyniki 30d`, `/wyniki all` |
+| `/eksport` | cała historia alertów jako plik CSV |
 | `/ustawienia` | wszystkie progi z aktualnymi wartościami |
 | `/ustaw klucz wartość` | zmiana, np. `/ustaw wczesny 50`, `/ustaw sieci solana,base`, `/ustaw plynnosc 30k` |
 | `/pauza`, `/wznow` | wstrzymanie i wznowienie alertów |
@@ -113,13 +115,22 @@ Alert „wczesny” wychodzi od wyniku 45, jeśli token nie ma flagi krytycznej 
 Aplikacja obserwuje też do 400 tokenów przez 48 godzin od pierwszego pojawienia, nawet gdy zejdą
 z list, żeby wyłapać ruch, zanim wrócą do trendów.
 
-## Pomiar skuteczności
+## Pomiar skuteczności i dziennik alertów
 
-Przy każdym alercie aplikacja zapisuje cenę i sprawdza ją po 1, 6 i 24 godzinach. Zakładka „Alerty”
-pokazuje, jaki procent sygnałów był na plusie, medianę zmiany i najwyższą cenę w ciągu 24 godzin.
-Token, który zniknął z DexScreenera, liczy się jako −100%. Kontrola wymaga działającej aplikacji;
-jeśli aplikacja wtedy nie działała, pomiar jest oznaczony jako pominięty i nie wchodzi do statystyk.
-Poniżej około 30 zamkniętych sygnałów wynik niewiele mówi.
+Każdy alert jest zapisywany na stałe w `~/krypto-radar-dane/data/calls/calls-RRRR-MM.jsonl` z pełnymi danymi
+z chwili wysłania: cena, płynność, wycena, wolumeny, transakcje, zmiany ceny, wiek, portfele, źródła, wszystkie
+składniki wyniku, flagi ryzyka, wynik kontroli kontraktu i progi, jakie wtedy obowiązywały. Potem aplikacja
+dopisuje cenę po 1, 6 i 24 godzinach oraz najwyższą i najniższą cenę w ciągu 24 h (z czasem, kiedy wystąpiły).
+
+- **Strona, zakładka Alerty** – skuteczność z całej historii: 24 h / 7 dni / 30 dni / całość, osobno wczesne
+  i gorące, w podziale na przedziały wyniku (czy wyższy wynik naprawdę działa lepiej) i na sieci.
+- **`/wyniki`** w Telegramie (`/wyniki 24h`, `/wyniki 30d`, `/wyniki all`) – to samo w skrócie.
+- **`/eksport`** – bot przysyła plik CSV z całą historią (otwiera się w Excelu i Arkuszach Google).
+- Na Orange Pi: `cd ~/krypto-radar && RADAR_CONFIG=~/krypto-radar-dane/config.json RADAR_DATA=~/krypto-radar-dane/data node server.js --export-csv > ~/alerty.csv`
+
+Token, który zniknął z DexScreenera, liczy się jako −100%. Pomiar wymaga działającej aplikacji; jeśli Orange Pi
+był wtedy wyłączony, pomiar jest oznaczony jako pominięty i nie wchodzi do statystyk. Poniżej około 30 zamkniętych
+alertów wynik niewiele mówi.
 
 ## Jak powstaje wynik „gorące teraz”
 
@@ -141,7 +152,7 @@ płynność i wolumen są powyżej minimów. O tym samym tokenie alert wraca naj
 - `config.json` – ustawienia domyślne; działająca konfiguracja jest w `~/krypto-radar-dane/config.json`,
 - `~/krypto-radar-dane/data/state.json` – historia alertów i pamięć aplikacji; można usunąć, żeby zacząć od zera,
 - `lib/score.js` – reguły punktacji i progi flag, jeśli zechcesz je dostroić,
-- `lib/outcomes.js` – pomiar skuteczności alertów,
+- `lib/outcomes.js` – pomiar skuteczności alertów, `lib/calllog.js` – dziennik alertów i statystyki,
 - `lib/publish.js` – wysyłanie danych na GitHuba, `lib/tgbot.js` – komendy z Telegrama, `lib/auth.js` – hasło panelu lokalnego,
 - `deploy/` – skrypt instalacyjny (tworzy też usługę systemd),
 - `test/run.js` – test całości bez internetu: `node test/run.js`.
