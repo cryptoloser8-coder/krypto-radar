@@ -346,7 +346,6 @@ function renderNfts() {
 function renderAlerts() {
   const view = $('view');
   const tgOn = S.config.telegram.connected;
-  const O = S.outcomes || {};
   const tracked = (a) => a.type === 'token' && a.price0 > 0;
   const chk = (a, name) => {
     if (!tracked(a)) return el('span', { class: 'mute', text: '–' });
@@ -358,21 +357,45 @@ function renderAlerts() {
     if (c.rug) { n.textContent += ' !'; n.title = 'Płynność spadła poniżej 1/5 tej z chwili alertu'; }
     return n;
   };
-  const win = (w) => (!w || !w.n ? el('span', { class: 'mute', text: 'jeszcze brak' }) : el('span', { title: `${w.big}% zyskało co najmniej 50%, ${w.bad}% straciło co najmniej 50%` }, `${w.up}% na plusie, mediana `, pct(w.median), ` (${w.n})`));
-  const statRow = (label, o) => el('tr', { class: 'row', style: 'cursor:default' },
-    el('td', { class: 'l', style: 'font-family:var(--ui);font-weight:600', text: label }),
-    el('td', { text: o ? o.total : 0 }),
+  const win = (w) => (!w || !w.n ? el('span', { class: 'mute', text: 'jeszcze brak' }) : el('span', { title: `${w.up}% na plusie, mediana ${w.median}%, średnio ${w.avg}%; ${w.big}% zyskało co najmniej 50%, ${w.bad}% straciło co najmniej 50% (sprawdzonych: ${w.n})` }, `${w.up}% · `, pct(w.median), el('span', { class: 'mute', text: ` (${w.n})` })));
+  const peakCell = (p) => (!p || !p.n ? el('span', { class: 'mute', text: 'jeszcze brak' }) : el('span', { title: `mediana szczytu ${p.median}%; ${p.p20}% doszło do +20%, ${p.p50}% do +50%; mediana czasu do szczytu: ${p.min} min` }, pct(p.median), ` · ${p.p20}%`));
+  const statRow = (label, o, sub) => el('tr', { class: 'row', style: 'cursor:default' },
+    el('td', { class: 'l', style: 'font-family:var(--ui);' + (sub ? 'padding-left:22px;color:var(--muted)' : 'font-weight:600'), text: label }),
+    el('td', { text: o ? o.n : 0 }),
     el('td', null, win(o && o.h1)), el('td', null, win(o && o.h6)), el('td', null, win(o && o.h24)),
-    el('td', null, !o || !o.peak || !o.peak.n ? el('span', { class: 'mute', text: 'jeszcze brak' }) : el('span', null, 'mediana ', pct(o.peak.median), `, ${o.peak.big}% doszło do +50%`)));
-  const closed = ['early', 'momentum'].reduce((s, k) => s + ((O[k] && O[k].h24 && O[k].h24.n) || 0), 0);
-  const stats = el('div', null,
-    el('h2', { style: 'font:600 15px/1.2 var(--ui);margin:0 0 8px', text: 'Skuteczność sygnałów z ostatnich 30 dni' }),
-    el('div', { class: 'tablewrap', style: 'margin-bottom:8px' }, el('table', { style: 'min-width:900px' },
-      el('thead', null, el('tr', null, ['Rodzaj', 'Sygnałów', 'Po 1 h', 'Po 6 h', 'Po 24 h', 'Najwyższa cena w 24 h'].map((h, i) => el('th', { class: i === 0 ? 'l' : '', text: h })))),
-      el('tbody', null, statRow('Wczesne sygnały', O.early), statRow('Gorące teraz', O.momentum)))),
-    el('p', { class: 'mute', style: 'margin:0 0 18px;max-width:86ch;font-size:13px', text:
-      'Zmiana ceny liczona od chwili alertu. W nawiasie liczba sprawdzonych sygnałów. ' +
-      (closed < 30 ? `Na razie zamkniętych po 24 h jest ${closed}; poniżej około 30 wynik niewiele mówi.` : 'Token, który zniknął z DexScreenera, liczy się jako −100%.') }));
+    el('td', null, peakCell(o && o.peak)),
+    el('td', { text: o && o.dead ? String(o.dead) : '–', title: 'Token zniknął albo płynność spadła poniżej 1/5 – w ciągu 24 h' }));
+  const HIST = S.history;
+  ui.hist = ui.hist || 'd7';
+  let stats;
+  if (HIST && HIST.periods) {
+    const P = HIST[ui.hist] || HIST.all;
+    const tabs = el('div', { class: 'filters', style: 'margin-bottom:8px' }, HIST.periods.map((p) =>
+      el('button', { class: 'topic', 'aria-pressed': String(ui.hist === p.key), style: 'padding:4px 12px', onclick: () => { ui.hist = p.key; render(); } }, el('div', { class: 'nm', text: p.label }))));
+    const rows = [];
+    for (const [k, label] of [['early', 'Wczesne sygnały'], ['momentum', 'Gorące teraz']]) {
+      rows.push(statRow(label, P.kinds[k]));
+      for (const b of P.buckets[k]) if (b.n) rows.push(statRow('wynik ' + b.label, b, true));
+    }
+    if (P.chains.length) {
+      rows.push(el('tr', null, el('td', { class: 'l', colspan: '7', style: 'font:600 12.5px var(--ui);color:var(--muted);padding-top:14px', text: 'Według sieci' })));
+      for (const c of P.chains) rows.push(statRow(c.chain, c, true));
+    }
+    const closed = P.all.h24.n;
+    stats = el('div', null,
+      el('h2', { style: 'font:600 15px/1.2 var(--ui);margin:0 0 8px', text: 'Skuteczność alertów' }),
+      tabs,
+      el('div', { class: 'tablewrap', style: 'margin-bottom:8px' }, el('table', { style: 'min-width:720px' },
+        el('thead', null, el('tr', null, ['Rodzaj', 'Alertów', 'Po 1 h', 'Po 6 h', 'Po 24 h', 'Szczyt w 24 h', 'Zniknęło'].map((h, i) => el('th', { class: i === 0 ? 'l' : '', text: h })))),
+        el('tbody', null, rows))),
+      el('p', { class: 'mute', style: 'margin:0 0 18px;max-width:90ch;font-size:13px', text:
+        'Po 1/6/24 h: odsetek alertów na plusie · mediana zmiany ceny od chwili alertu (w nawiasie liczba sprawdzonych). Szczyt: mediana najwyższej ceny w ciągu 24 h · odsetek, który doszedł do +20%. Najedź na wartość po szczegóły. ' +
+        (HIST.first ? `Dziennik od ${new Date(HIST.first).toLocaleDateString('pl-PL')}, łącznie ${HIST.total} alertów. ` : '') +
+        (closed < 30 ? `Zamkniętych po 24 h w tym okresie: ${closed} – poniżej około 30 wynik niewiele mówi.` : 'Token, który zniknął z DexScreenera, liczy się jako −100%.') +
+        ' Pełna historia z wszystkimi danymi: /eksport w Telegramie.' }));
+  } else {
+    stats = el('p', { class: 'mute', text: 'Statystyki pojawią się po pierwszym alercie zapisanym w dzienniku.' });
+  }
 
   const when = (t) => new Date(t).toLocaleString('pl-PL', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' });
   const KIND = { early: 'wczesny', momentum: 'gorący' };
