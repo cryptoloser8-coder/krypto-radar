@@ -115,11 +115,25 @@ function unit() {
   assert.strictEqual(al[3].checks.h1.missed, true);                  // brak danych, ale nie z winy tokena
   outcomes.track(al, world(0.8), askedAll, T0 + 6 * HOUR + 60e3);
   outcomes.track(al, world(2), askedAll, T0 + 24 * HOUR + 60e3);
-  assert.deepStrictEqual([al[0].checks.h6.chg, al[0].checks.h24.chg, al[0].done, al[0].peak], [-20, 100, true, 2]);
-  const st = outcomes.stats(al);
-  assert.deepStrictEqual([st.early.total, st.early.h1.n, st.early.h1.up, st.early.h1.median], [4, 3, 33, -90]); // +20, −100, −90; pominięty nie liczy się
-  assert.strictEqual(st.momentum.total, 0);
-  console.log('✓ pomiar skuteczności: kontrole po 1, 6 i 24 h, tokeny znikające i wycofana płynność');
+  assert.deepStrictEqual([al[0].checks.h6.chg, al[0].checks.h24.chg, al[0].peak], [-20, 100, 2]);
+  assert.deepStrictEqual([al[0].checks.h1.pk, al[0].checks.h1.lo, al[0].checks.h24.pk, al[0].checks.h24.lo], [50, 0, 100, -20]);
+  assert.ok(!al[0].done, 'po 24 h pomiar trwa dalej (72 h, 7 dni)');
+  // Po pierwszej dobie cenę pobieramy tylko w oknach pomiarów.
+  assert.strictEqual(outcomes.wantsPrice(al[0], T0 + 30 * HOUR), false);
+  assert.strictEqual(outcomes.wantsPrice(al[0], T0 + 72 * HOUR - 60e3), true);
+  // 72 h: szczyt i dołek ze świec godzinowych (cena 3 → szczyt +200%, dołek 0,4 → −60%).
+  const candles = [[(T0 + 30 * HOUR) / 1000, 1, 3, 0.9, 1], [(T0 + 50 * HOUR) / 1000, 1, 1.1, 0.4, 1], [(T0 + 100 * HOUR) / 1000, 1, 9, 0.1, 1]];
+  const w72 = outcomes.wantsExtremes(al[0], T0 + 72 * HOUR + 60e3);
+  assert.deepStrictEqual(w72.map((w) => w.name), ['h72']);
+  al[0].ext = { h72: outcomes.extremesFromCandles(candles, w72[0].from, w72[0].to) };
+  assert.deepStrictEqual(al[0].ext.h72, { hi: 3, lo: 0.4 }, 'świeca po 72 h się nie liczy');
+  outcomes.track(al, world(1.1), askedAll, T0 + 72 * HOUR + 60e3);
+  assert.deepStrictEqual([al[0].checks.h72.chg, al[0].checks.h72.pk, al[0].checks.h72.lo, al[0].checks.h72.approx], [10, 200, -60, undefined]);
+  // 7 dni bez świec: szczyt przybliżony (z pierwszej doby i z chwili pomiaru), potem koniec pomiaru.
+  outcomes.track(al, world(0.5), askedAll, T0 + 168 * HOUR + 60e3);
+  assert.deepStrictEqual([al[0].checks.d7.chg, al[0].checks.d7.pk, al[0].checks.d7.approx, al[0].done], [-50, 100, true, true]);
+  assert.strictEqual(al[3].checks.h72.missed, true); // aplikacja „nie działała” w oknie 72 h
+  console.log('✓ pomiar skuteczności: 1 h, 6 h, 24 h, 72 h, 7 dni, szczyty ze świec, tokeny znikające i wycofana płynność');
 }
 
 async function integration() {
@@ -138,9 +152,19 @@ async function integration() {
   // oraz alert na token, którego DexScreener już nie zna (trzy skany bez danych).
   const seedAt = Date.now() - 61 * 60e3;
   fs.mkdirSync(path.join(dir, 'data'));
+  // Alert sprzed 72 h (już w dzienniku): pomiar 72 h ze szczytem i dołkiem ze świec GeckoTerminal.
+  const at72 = Date.now() - 72 * 3.6e6 - 5 * 60e3;
+  const old72 = { id: 'seed72x', at: at72, type: 'token', kind: 'momentum', key: 'solana:' + mock.GOOD, chain: 'solana', address: mock.GOOD, symbol: 'OLD', score: 60, risk: 'none', price0: 0.00000615, liq0: 100000, peak: 0.00000615, low: 0.00000615, pair: 'POOLOLD',
+    checks: { h1: { chg: 1, t: at72 + 3.6e6 }, h6: { chg: 2, t: at72 + 6 * 3.6e6 }, h24: { chg: 3, t: at72 + 864e5, pk: 10, lo: -1 } } };
+  fs.mkdirSync(path.join(dir, 'data', 'calls'), { recursive: true });
+  const d72 = new Date(at72);
+  fs.writeFileSync(path.join(dir, 'data', 'calls', `calls-${d72.getUTCFullYear()}-${String(d72.getUTCMonth() + 1).padStart(2, '0')}.jsonl`),
+    JSON.stringify({ t: 'call', id: 'seed72x', at: at72, type: 'token', kind: 'momentum', symbol: 'OLD', chain: 'solana', score: 60, risk: 'none', price: 0.00000615, sent: true }) + '\n');
+
   fs.writeFileSync(path.join(dir, 'data', 'state.json'), JSON.stringify({ alerts: [
     { at: seedAt, type: 'token', kind: 'early', key: 'solana:' + mock.GOOD, chain: 'solana', address: mock.GOOD, symbol: 'GOOD', score: 60, risk: 'none', price0: 0.00000615, liq0: 100000, peak: 0.00000615, low: 0.00000615, checks: {} },
     { at: Date.now() - 85 * 60e3, type: 'token', kind: 'early', key: 'solana:GoneMint', chain: 'solana', address: 'GoneMint', symbol: 'GONE', score: 55, risk: 'none', price0: 1, liq0: 30000, peak: 1, low: 1, checks: {}, miss: { h1: 3 } },
+    old72,
   ] }));
   const srv = await mock.start(MOCK);
   const app = spawn(process.execPath, [path.join(__dirname, '..', 'server.js')], { env: Object.assign({}, process.env, { RADAR_CONFIG: path.join(dir, 'config.json'), RADAR_DATA: path.join(dir, 'data') }), stdio: ['ignore', 'pipe', 'inherit'] });
@@ -214,14 +238,27 @@ async function integration() {
     const earlyMsgs = sent.filter((m) => m.text.startsWith('🌱'));
     assert.strictEqual(earlyMsgs.length, 1, 'wczesne: ' + earlyMsgs.map((a) => a.text.split('\n')[0]).join(' | '));
     assert.ok(/EARLY/.test(earlyMsgs[0].text) && /70 kupujących \/ 30 sprzedających/.test(earlyMsgs[0].text));
-    const logged = st.alerts.find((a) => a.kind === 'early' && a.symbol === 'EARLY');
-    assert.ok(logged && logged.price0 > 0 && logged.address === mock.EARLY);
+    const A = await fetch(`http://127.0.0.1:${APP}/api/alerts`).then((r) => r.json());
+    const live = A.live.alerts;
+    const logged = live.find((a) => a.kind === 'early' && a.symbol === 'EARLY');
+    assert.ok(logged && logged.price0 > 0 && logged.id && logged.pair === undefined, 'wiersz listy bez zbędnych pól');
 
     // Pomiar skuteczności: alert sprzed 61 min po połowie ceny → +100% po 1 h; nieznany token → zniknął.
-    const seeded = st.alerts.find((a) => a.at === seedAt);
+    const seeded = live.find((a) => a.at === seedAt);
     assert.strictEqual(seeded.checks.h1.chg, 100);
-    assert.strictEqual(st.alerts.find((a) => a.symbol === 'GONE').checks.h1.dead, true);
-    assert.deepStrictEqual([st.outcomes.early.h1.n, st.outcomes.early.h1.up, st.outcomes.early.h1.median], [2, 50, 0]);
+    assert.deepStrictEqual([seeded.checks.h1.pk, seeded.checks.h1.lo], [100, 0]);
+    assert.strictEqual(live.find((a) => a.symbol === 'GONE').checks.h1.dead, true);
+    // Alerty sprzed dziennika dostały id i trafiły do indeksu (historia, podgląd skuteczności).
+    const rs = A.index.rows.find((r) => r.id === seeded.id);
+    assert.ok(seeded.id && rs && rs.x.h1 && rs.x.h1[0] === 100, 'dopisanie starszych alertów do dziennika: ' + JSON.stringify(rs));
+    // 72 h: zmiana +100%, szczyt +300% i dołek −51,2% ze świec (świeca po końcu okna się nie liczy).
+    const r72 = A.index.rows.find((r) => r.id === 'seed72x');
+    assert.deepStrictEqual(r72 && r72.x.h72, [100, 300, -51.2, ''], JSON.stringify(r72));
+    assert.ok(!live.some((a) => a.id === 'seed72x'), 'lista 24 h nie zawiera starszych alertów');
+    // Szczegóły na żądanie.
+    const det = await fetch(`http://127.0.0.1:${APP}/api/alert?id=${logged.id}`).then((r) => r.json());
+    assert.ok(det.d && det.d.threshold === 45 && det.d.early.parts.demand > 0 && Array.isArray(det.path) && det.price0 > 0);
+    assert.strictEqual((await fetch(`http://127.0.0.1:${APP}/api/alert?id=../config`)).status, 404);
     assert.strictEqual(st.config.telegram.connected, true);
     assert.ok(!JSON.stringify(st).includes('AAAAAAAAAAAA'), 'token bota nie może trafić do przeglądarki');
 
@@ -250,7 +287,7 @@ async function integration() {
     // Publikacja: data.json na gałęzi „data”, jeden commit bez historii, bez żadnych sekretów.
     const gitR = (...a) => execFileSync('git', ['--git-dir', bare, ...a]).toString();
     const pub = JSON.parse(gitR('show', 'data:data.json'));
-    assert.ok(pub.tokens.length >= 5 && pub.publishedAt > 0 && pub.config.alerts && pub.outcomes);
+    assert.ok(pub.tokens.length >= 5 && pub.publishedAt > 0 && pub.config.alerts && pub.alertsCount);
     const pubTxt = JSON.stringify(pub);
     for (const secret of ['AAAAAAAAAAAA', 'kryptoradar_test_bot', '424242', 'pairCode', 'scrypt$']) assert.ok(!pubTxt.includes(secret), 'na GitHub trafiło: ' + secret);
     assert.strictEqual(gitR('rev-list', '--count', 'data').trim(), '1');
@@ -277,24 +314,27 @@ async function integration() {
     assert.deepStrictEqual(cfgNow.alerts.chains, ['solana', 'base']);
     assert.strictEqual(cfgNow.alerts.minScore, 75);
 
-    // Szczegóły pojedynczych alertów: lokalnie /api/alerts i na GitHubie alerts.json – z obrazem z chwili alertu.
-    const al = await fetch(`http://127.0.0.1:${APP}/api/alerts`).then((r) => r.json());
-    const ae = al.alerts.find((a) => a.symbol === 'EARLY' && a.id);
-    assert.ok(ae && ae.d && ae.d.threshold === 45 && ae.d.early.parts.demand > 0 && ae.d.liq === 60000 && ae.d.uniq.buyers === 70 && Array.isArray(ae.path), JSON.stringify(ae).slice(0, 300));
-    const pubAl = JSON.parse(gitR('show', 'data:alerts.json'));
-    assert.ok(pubAl.alerts.some((a) => a.symbol === 'GOOD' && a.d && a.d.momentum.parts.vol > 0));
-    assert.ok(!JSON.stringify(pubAl).includes('AAAAAAAAAAAA'));
+    // Na GitHub: lista 24 h, indeks 30 dni i szczegóły każdego alertu – bez sekretów.
+    const pubLive = JSON.parse(gitR('show', 'data:alerts-live.json'));
+    const pubIdx = JSON.parse(gitR('show', 'data:alerts-index.json'));
+    const ge = pubLive.alerts.find((a) => a.symbol === 'GOOD' && a.kind === 'momentum');
+    assert.ok(ge && pubIdx.rows.some((r) => r.id === ge.id));
+    const pubDet = JSON.parse(gitR('show', `data:details/${ge.id}.json`));
+    assert.ok(pubDet.d && pubDet.d.momentum.parts.vol > 0);
+    assert.ok(!(gitR('ls-tree', '-r', '--name-only', 'data') + JSON.stringify([pubLive, pubIdx, pubDet])).includes('AAAAAAAAAAAA'));
 
     // Dziennik: pełny zapis alertów, bez sekretów; statystyki w danych strony; /wyniki i /eksport.
     const logDir = path.join(dir, 'data', 'calls');
     const logLines = fs.readdirSync(logDir).flatMap((f) => fs.readFileSync(path.join(logDir, f), 'utf8').trim().split('\n')).map((l) => JSON.parse(l));
     const calls = logLines.filter((o) => o.t === 'call');
-    assert.deepStrictEqual(calls.map((c) => c.symbol).sort(), ['EARLY', 'GOOD']);
+    assert.deepStrictEqual(calls.filter((c) => !c.backfill && c.id !== 'seed72x').map((c) => c.symbol).sort(), ['EARLY', 'GOOD']);
+    assert.deepStrictEqual(calls.filter((c) => c.backfill).map((c) => c.symbol).sort(), ['GONE', 'GOOD']);
     const ce = calls.find((c) => c.symbol === 'EARLY');
     assert.ok(ce.id && ce.price > 0 && ce.liquidityUsd === 60000 && ce.early.parts.demand > 0 && ce.vol.h1 === 12000 && ce.uniq.h1.buyers === 70 && ce.settings.early.minScore === 45 && ce.threshold === 45, JSON.stringify(ce).slice(0, 300));
     assert.ok(!JSON.stringify(logLines).includes('AAAAAAAAAAAA'));
     const pub2 = JSON.parse(gitR('show', 'data:data.json'));
-    assert.ok(pub2.history && pub2.history.total === 2 && pub2.history.d1.kinds.early.n === 1, JSON.stringify(pub2.history && pub2.history.d1.kinds));
+    assert.ok(pub2.alertsCount && pub2.alertsCount.day === 4 && pub2.alertsCount.total === 5, JSON.stringify(pub2.alertsCount));
+    assert.ok(!('alerts' in pub2) && !('history' in pub2), 'lista alertów jest w osobnych plikach');
     const nSent2 = (await fetch(base + '/__sent').then((r) => r.json())).length;
     await tgSay(424242, '/wyniki 24h');
     await tgSay(424242, '/eksport');
@@ -304,7 +344,7 @@ async function integration() {
       docs = await fetch(base + '/__docs').then((r) => r.json());
     }
     const wyn = (await fetch(base + '/__sent').then((r) => r.json())).slice(nSent2);
-    assert.ok(wyn.length && /Skuteczność – 24 h/.test(wyn[0].text) && /Wczesne<\/b> – 1 alertów/.test(wyn[0].text), wyn[0] && wyn[0].text);
+    assert.ok(wyn.length && /Skuteczność – 24 h/.test(wyn[0].text) && /Wczesne<\/b> – 3 alertów/.test(wyn[0].text), wyn[0] && wyn[0].text);
     assert.ok(docs.length === 1 && /krypto-radar-alerty-.*\.csv/.test(docs[0]) && /id;czas;rodzaj;symbol/.test(docs[0]) && /EARLY/.test(docs[0]));
 
     console.log('✓ całość: źródła, łączenie danych, flagi, alerty, publikacja na GitHub, komendy Telegram, dziennik');
@@ -343,10 +383,13 @@ function callLogUnit() {
   const chk = (id, name, chg, extra) => L.append(Object.assign({ t: 'check', id, at: t0 + 3.6e6, name, chg, p: 1 + chg / 100 }, extra));
   chk('a', 'h1', 20); chk('a', 'h6', 50); chk('a', 'h24', 100);
   chk('b', 'h1', -10); chk('b', 'h6', -60); chk('b', 'h24', -100, { dead: true });
-  chk('c', 'h1', 5); L.append({ t: 'check', id: 'c', at: t0 + 7 * 3.6e6, name: 'h6', missed: true });
+  chk('c', 'h1', 5); L.append({ t: 'check', id: 'c', at: t0 + 25 * 3.6e6, name: 'h24', missed: true });
+  L.append({ t: 'check', id: 'a', at: t0 + 72 * 3.6e6, name: 'h72', chg: 300, p: 4, pk: 400, lo: -5 }); // nowy format: szczyt w linii pomiaru
   L.append({ t: 'done', id: 'a', at: t0 + 864e5, peakPct: 150, lowPct: -5, peakMin: 600 });
   L.append({ t: 'done', id: 'b', at: t0 + 864e5, peakPct: 3, lowPct: -100, peakMin: 10 });
   assert.deepStrictEqual(fs.readdirSync(dir).sort(), ['calls-2026-10.jsonl', 'calls-2026-11.jsonl']);
+  // Linia pomiaru z wersji, w której godzina pomiaru nadpisała typ linii – ma zostać rozpoznana.
+  L.append({ t: t0 + 3.7e6, id: 'c', at: t0 + 3.7e6, name: 'h6', chg: 7, p: 1.07 });
   fs.appendFileSync(path.join(dir, 'calls-2026-11.jsonl'), '{"t":"check","id":"a", uszkodzon'); // przerwany zapis
 
   const S = new CallLog(dir).summary(t0 + 2 * 864e5); // świeży odczyt z plików
@@ -354,7 +397,15 @@ function callLogUnit() {
   assert.strictEqual(S.total, 3);
   assert.deepStrictEqual([e.n, e.h1.up, e.h24.median, e.h24.big, e.h24.bad, e.dead], [2, 50, 0, 50, 50, 1]);
   assert.deepStrictEqual([e.peak.n, e.peak.median, e.peak.p50], [2, 76.5, 50]);
-  assert.deepStrictEqual([m.n, m.h1.n, m.h6.n], [1, 1, 0], 'pominięty pomiar nie wchodzi do statystyk');
+  assert.deepStrictEqual([m.n, m.h1.n, m.h24.n], [1, 1, 0], 'pominięty pomiar nie wchodzi do statystyk');
+  assert.strictEqual(new CallLog(dir).calls.get('c').checks.h6.chg, 7, 'stara, uszkodzona linia pomiaru');
+  assert.deepStrictEqual([e.h72.n, e.h72.median], [1, 300]);
+  // Indeks dla strony: [zmiana, szczyt, dołek, znacznik]; szczyt 24 h ze starego formatu (linia „done”).
+  const idx = new CallLog(dir).index(t0 + 2 * 864e5, 30);
+  const ia = idx.find((r) => r.id === 'a'), ib = idx.find((r) => r.id === 'b'), ic = idx.find((r) => r.id === 'c');
+  assert.deepStrictEqual([ia.t, ia.x.h24, ia.x.h72], ['e', [100, 150, -5, ''], [300, 400, -5, '']]);
+  assert.deepStrictEqual([ib.x.h24[3], ic.t, ic.x.h24], ['d', 'm', ['m']]);
+  assert.strictEqual(new CallLog(dir).index(t0 + 40 * 864e5, 30).length, 0, 'indeks obejmuje tylko 30 dni');
   assert.deepStrictEqual(S.d7.buckets.early.map((b) => b.n), [0, 1, 0, 1]);
   assert.strictEqual(S.d1.all.n, 0, 'alert sprzed 2 dni nie należy do „24 h”');
   assert.deepStrictEqual(S.d7.chains.map((c) => [c.chain, c.n]), [['solana', 2], ['base', 1]]);
@@ -367,7 +418,8 @@ function callLogUnit() {
   assert.ok(rowA.includes('"N;""x"""'), 'średnik i cudzysłów w nazwie muszą być w cudzysłowie');
   const cols = rowA.replace('"N;""x"""', 'Q').split(';');
   assert.strictEqual(cols[head.indexOf('zmiana po 24h %')], '100');
-  assert.strictEqual(cols[head.indexOf('szczyt 24h %')], '150');
+  assert.strictEqual(cols[head.indexOf('szczyt do 24h %')], '150');
+  assert.strictEqual(cols[head.indexOf('szczyt do 72h %')], '400');
   assert.ok(lines.find((l) => l.startsWith('c;')).includes(';pominięty;'));
   assert.ok(lines.find((l) => l.startsWith('b;')).includes(';tak;https://x/b'), 'zniknięty token oznaczony');
   console.log('✓ dziennik alertów: zapis, wyniki, statystyki według okresu, wyniku i sieci, eksport CSV');
@@ -469,9 +521,10 @@ async function access() {
     const after = (await fetch(base + '/__sent').then((r) => r.json())).slice(sentBefore);
     assert.strictEqual(after.filter((m) => m.text.startsWith('🌱')).length, 1, 'wczesny sygnał powinien wyjść w drugim skanie');
     assert.strictEqual(after.filter((m) => m.text.startsWith('🚨')).length, 1);
-    const st2 = await (await req('/api/state', { headers: jar })).json();
+    const st2 = (await (await req('/api/alerts', { headers: jar })).json()).live;
     assert.strictEqual(st2.alerts.filter((a) => a.kind === 'early').length, 1);
     assert.ok(st2.alerts.every((a) => a.sent), 'zapisane alerty powinny być wysłane');
+    assert.strictEqual((await req('/api/alerts')).status, 401, 'lista alertów tylko po zalogowaniu');
 
     // Zgadywanie hasła: po 5 błędach blokada – nawet dobre hasło nie przechodzi.
     for (let i = 0; i < 5; i++) assert.strictEqual((await login('zle-haslo-' + i)).status, 401);
