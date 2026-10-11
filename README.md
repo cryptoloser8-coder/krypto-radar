@@ -122,6 +122,9 @@ z chwili wysłania: cena, płynność, wycena, wolumeny, transakcje, zmiany ceny
 składniki wyniku, flagi ryzyka, wynik kontroli kontraktu i progi, jakie wtedy obowiązywały. Potem aplikacja
 dopisuje cenę po 1, 6 i 24 godzinach oraz najwyższą i najniższą cenę w ciągu 24 h (z czasem, kiedy wystąpiły).
 
+- **Strona, zakładka Alerty, lista alertów** – kliknięcie alertu rozwija jego szczegóły: wykres ceny przez 24 h
+  od alertu (punkt co ~15 min), wyniki po 1, 6 i 24 h z cenami, szczyt i dołek z czasem, powód wysłania (wynik,
+  próg, składniki, flagi), stan tokena w chwili alertu i źródła. Strona trzyma ostatnie 500 alertów; starsze są w eksporcie.
 - **Strona, zakładka Alerty** – skuteczność z całej historii: 24 h / 7 dni / 30 dni / całość, osobno wczesne
   i gorące, w podziale na przedziały wyniku (czy wyższy wynik naprawdę działa lepiej) i na sieci.
 - **`/wyniki`** w Telegramie (`/wyniki 24h`, `/wyniki 30d`, `/wyniki all`) – to samo w skrócie.
