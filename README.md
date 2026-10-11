@@ -119,21 +119,30 @@ z list, żeby wyłapać ruch, zanim wrócą do trendów.
 
 Każdy alert jest zapisywany na stałe w `~/krypto-radar-dane/data/calls/calls-RRRR-MM.jsonl` z pełnymi danymi
 z chwili wysłania: cena, płynność, wycena, wolumeny, transakcje, zmiany ceny, wiek, portfele, źródła, wszystkie
-składniki wyniku, flagi ryzyka, wynik kontroli kontraktu i progi, jakie wtedy obowiązywały. Potem aplikacja
-dopisuje cenę po 1, 6 i 24 godzinach oraz najwyższą i najniższą cenę w ciągu 24 h (z czasem, kiedy wystąpiły).
+składniki wyniku, flagi ryzyka, wynik kontroli kontraktu i progi, jakie wtedy obowiązywały.
 
-- **Strona, zakładka Alerty, lista alertów** – kliknięcie alertu rozwija jego szczegóły: wykres ceny przez 24 h
-  od alertu (punkt co ~15 min), wyniki po 1, 6 i 24 h z cenami, szczyt i dołek z czasem, powód wysłania (wynik,
-  próg, składniki, flagi), stan tokena w chwili alertu i źródła. Strona trzyma ostatnie 500 alertów; starsze są w eksporcie.
-- **Strona, zakładka Alerty** – skuteczność z całej historii: 24 h / 7 dni / 30 dni / całość, osobno wczesne
-  i gorące, w podziale na przedziały wyniku (czy wyższy wynik naprawdę działa lepiej) i na sieci.
-- **`/wyniki`** w Telegramie (`/wyniki 24h`, `/wyniki 30d`, `/wyniki all`) – to samo w skrócie.
-- **`/eksport`** – bot przysyła plik CSV z całą historią (otwiera się w Excelu i Arkuszach Google).
-- Na Orange Pi: `cd ~/krypto-radar && RADAR_CONFIG=~/krypto-radar-dane/config.json RADAR_DATA=~/krypto-radar-dane/data node server.js --export-csv > ~/alerty.csv`
+Potem aplikacja mierzy cenę po **1 h, 6 h, 24 h, 72 h i 7 dniach**, a przy każdym pomiarze zapisuje też
+**szczyt i dołek w całym oknie od alertu**. Przez pierwszą dobę cena jest sprawdzana co skan (stąd wykres
+i dokładny szczyt); dla 72 h i 7 dni szczyt i dołek pochodzą ze świec godzinowych GeckoTerminal, pobieranych raz,
+przy pomiarze. Poza oknami pomiarów starsze alerty nie obciążają skanów.
+
+**Strona, zakładka Alerty:**
+
+- **Skuteczność z ostatnich 30 dni** – cztery karty: po 1 h, 24 h, 72 h, 7 dniach – ile alertów wzrosło, ile
+  spadło i mediana. Przełącznik „zmianę po czasie” / „szczyt i dołek w tym czasie”. Progi wzrostu
+  (+25/+50/+100% albo własny) i spadku (−25/−50/−75% albo własny) pokazują na kartach, ile alertów je osiągnęło,
+  a pod kartami listę pasujących alertów dla wybranego okna (kliknij kartę, żeby je zmienić).
+- **Alerty z ostatnich 24 h**, a starsze (do 30 dni) po kliknięciu **Historia**.
+- Kliknięcie alertu rozwija szczegóły: wykres ceny przez 24 h, wyniki po 1/6/24/72 h i 7 dniach ze szczytem
+  i dołkiem, powód wysłania (wynik, próg, składniki, flagi) i stan tokena w chwili alertu.
+
+**Telegram:** `/wyniki` (`/wyniki 24h`, `/wyniki 30d`, `/wyniki all`) – skrót statystyk; `/eksport` – plik CSV
+z całą historią i wszystkimi pomiarami (Excel, Arkusze Google).
+Na Orange Pi: `cd ~/krypto-radar && RADAR_CONFIG=~/krypto-radar-dane/config.json RADAR_DATA=~/krypto-radar-dane/data node server.js --export-csv > ~/alerty.csv`
 
 Token, który zniknął z DexScreenera, liczy się jako −100%. Pomiar wymaga działającej aplikacji; jeśli Orange Pi
-był wtedy wyłączony, pomiar jest oznaczony jako pominięty i nie wchodzi do statystyk. Poniżej około 30 zamkniętych
-alertów wynik niewiele mówi.
+był wtedy wyłączony, pomiar jest oznaczony jako pominięty i nie wchodzi do statystyk. Poniżej około 30
+sprawdzonych alertów wynik niewiele mówi.
 
 ## Jak powstaje wynik „gorące teraz”
 
