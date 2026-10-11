@@ -15,7 +15,13 @@ if (typeof fetch !== 'function') {
   process.exit(1);
 }
 
-const { collectTokens, collectNfts, annotateUniq, candleExtremes } = require('./lib/sources');
+const { collectTokens, collectNfts, annotateUniq, candleExtremes, tokenHolders, poolTrades, rugcheckReport, marketContext, tgMembers, setBudget } = require('./lib/sources');
+const { Tape } = require('./lib/tape');
+const { Health } = require('./lib/health');
+const { backup } = require('./lib/backup');
+
+// Wersja danych i strony – strona porównuje ją ze swoją i prosi o odświeżenie, gdy się różnią.
+const APP_VERSION = 9;
 const { scoreToken, scoreEarly, scoreNft } = require('./lib/score');
 const security = require('./lib/security');
 const tg = require('./lib/telegram');
@@ -72,6 +78,11 @@ const DEFAULTS = {
   security: { enabled: true, perScan: 10 },
   // Wysyłanie danych na GitHuba (strona na GitHub Pages czyta je z gałęzi `branch`).
   publish: { enabled: false, repo: '', branch: 'data', intervalSec: 120, keyPath: '' },
+  gtPerMin: 9, // limit zapytań do GeckoTerminal na minutę (bez klucza ~10)
+  tape: { enabled: true, intervalMin: 5 }, // zapis stanu wszystkich tokenów (taśma)
+  health: { enabled: true, afterMin: 30 }, // wiadomość na Telegram, gdy źródło nie działa od tylu minut
+  // Codzienna kopia katalogu z danymi; dir puste = obok katalogu danych (…/krypto-radar-kopie).
+  backup: { enabled: true, dir: '', keep: 14, hour: 4 },
 };
 
 function merge(base, over) {
@@ -109,6 +120,8 @@ const state = merge({ alerted: {}, firstSeen: {}, cold: {}, watch: {}, alerts: [
 let lastSave = 0, stateDirty = false;
 // Dziennik alertów (na stałe, poza state.json): DATA_DIR/calls/calls-RRRR-MM.jsonl
 const calllog = new CallLog(path.join(DATA_DIR, 'calls'));
+const tape = new Tape(path.join(DATA_DIR, 'tape'));
+const health = new Health({ afterMin: (cfg.health && cfg.health.afterMin) || 30 });
 
 // Alerty sprzed dziennika (bez id) dopisujemy do niego w skrócie, żeby były w historii i statystykach.
 function backfillAlerts() {
@@ -212,7 +225,7 @@ function pruneAlerts() {
 // Szczegóły jednego alertu (DATA_DIR/details/<id>.json): obraz z chwili alertu, pomiary, przebieg ceny.
 // Zapisywane przy alercie i przy każdym pomiarze; strona pobiera je dopiero po rozwinięciu alertu.
 const DETAILS_DIR = path.join(DATA_DIR, 'details');
-const ROW_KEYS = ['id', 'at', 'type', 'kind', 'symbol', 'chain', 'score', 'risk', 'url', 'sent', 'error', 'price0', 'liq0', 'mc0', 'checks', 'peak', 'peakAt', 'low', 'lowAt', 'done', 'path'];
+const ROW_KEYS = ['id', 'at', 'type', 'kind', 'symbol', 'chain', 'score', 'risk', 'url', 'sent', 'error', 'price0', 'liq0', 'mc0', 'checks', 'peak', 'peakAt', 'low', 'lowAt', 'done', 'path', 'enrich'];
 const rowOf = (a) => {
   const o = {};
   for (const k of ROW_KEYS) if (a[k] != null) o[k] = a[k];
@@ -274,7 +287,55 @@ function tokenSnapshot(t, kind, entry, threshold) {
     momentum: { score: s.score, raw: s.momentum, penalty: s.penalty, parts: { vol: s.parts.vol, act: s.parts.act, buy: s.parts.buy, price: s.parts.price, attn: s.parts.attn } },
     early: e ? { score: e.score, raw: e.raw, parts: e.parts, late: e.late, penalty: e.penalty, volX: e.volX, txX: e.txX, inScope: e.inScope, why: e.why } : null,
     settings: { alerts: cfg.alerts, early: cfg.early },
+    // Dane dodatkowe z chwili alertu (posiadacze i członkowie Telegrama – też trend sprzed alertu).
+    market: snapshot.market || null,
+    avgTx: t.avgTx || null,
+    secInfo: t.secInfo || null,
+    holdersPre: trendOf(cache.holdersHist, t.key, entry.at),
+    tgPre: trendOf(cache.tgHist, t.key, entry.at),
+    tgLink: (t.socials && t.socials.telegram) || null,
   };
+}
+
+// ---- Historia posiadaczy i członków Telegrama (w pamięci, 3 h) ------------------
+
+function pushHist(mapName, key, count, now, minGapMs = 5 * 60e3) {
+  if (count == null || !Number.isFinite(count)) return;
+  const m = (cache[mapName] = cache[mapName] || new Map());
+  const arr = m.get(key) || [];
+  if (arr.length && now - arr[arr.length - 1].t < minGapMs) arr[arr.length - 1] = { t: now, c: count };
+  else arr.push({ t: now, c: count });
+  m.set(key, arr.filter((x) => now - x.t < 3 * 3.6e6));
+}
+// Stan teraz i zmiana od najstarszego pomiaru sprzed co najmniej 10 minut.
+function trendOf(m, key, now) {
+  const arr = m && m.get(key);
+  if (!arr || !arr.length) return null;
+  const last = arr[arr.length - 1];
+  if (now - last.t > 20 * 60e3) return null;
+  const first = arr.find((x) => last.t - x.t >= 10 * 60e3);
+  const out = { count: last.c, minAgo: Math.round((now - last.t) / 60000) };
+  if (first) Object.assign(out, { before: first.c, minutes: Math.round((last.t - first.t) / 60000), change: last.c - first.c, changePct: first.c > 0 ? Math.round((1000 * (last.c - first.c)) / first.c) / 10 : null });
+  return out;
+}
+
+// Średnia wielkość transakcji (wolumen ÷ liczba transakcji) – dostępna dla każdego tokena bez zapytań.
+function avgTxOf(t) {
+  const o = {};
+  for (const w of ['m5', 'h1', 'h24']) {
+    const n = ((t.txns[w] && t.txns[w].buys) || 0) + ((t.txns[w] && t.txns[w].sells) || 0);
+    if (n > 0 && t.vol[w] > 0) o[w] = Math.round((t.vol[w] / n) * 100) / 100;
+  }
+  return Object.keys(o).length ? o : null;
+}
+
+// „Temperatura” memecoinów: łączny obrót modnych narracji DexScreenera i zmiana ich wyceny.
+function memeHeat(metas) {
+  const list = (metas || []).filter((m) => m.marketCap > 0);
+  if (!list.length) return null;
+  const cap = list.reduce((s, m) => s + m.marketCap, 0);
+  const w = (k) => Math.round((10 * list.reduce((s, m) => s + (m.chg[k] || 0) * m.marketCap, 0)) / cap) / 10;
+  return { n: list.length, vol: Math.round(list.reduce((s, m) => s + (m.volume || 0), 0)), h1: w('h1'), h24: w('h24') };
 }
 
 const telegramReady = () => !!(cfg.telegram.token && cfg.telegram.chatId);
@@ -315,8 +376,10 @@ async function tokenAlerts(tokens, now, kind) {
       at: now, type: 'token', kind, key: t.key, chain: t.chain, address: t.address, symbol: t.symbol, name: t.name,
       score, risk: t.s.risk, url: t.url, sent: res.sent, error: res.error,
       price0: t.priceUsd, liq0: t.liquidityUsd, mc0: t.marketCap || t.fdv || null, peak: t.priceUsd, low: t.priceUsd, checks: {},
-      pair: t.pairAddress || null,
+      pair: t.pairAddress || null, tg: (t.socials && t.socials.telegram) || null,
     });
+    t.alerted = early ? 'e' : 'm';
+    (state.enrich = state.enrich || []).push({ id: entry.id, tag: 'alert', at: now, chain: t.chain, address: t.address, pair: t.pairAddress || null, tg: entry.tg });
     try {
       calllog.append(tokenSnapshot(t, kind, entry, early ? cfg.early.minScore : cfg.alerts.minScore));
     } catch (e) {
@@ -355,6 +418,109 @@ async function ensureTelegramChat() {
   }
 }
 
+// Posiadacze (GeckoTerminal) i członkowie Telegrama dla czołówki kandydatów – zanim dostaną alert,
+// żeby przy alercie znać trend. Najwyżej 1–2 zapytania do GeckoTerminal i 3 do Telegrama na skan.
+async function sampleCandidates(tokens, now) {
+  const seen = new Set();
+  const cands = [];
+  const add = (t) => {
+    if (!seen.has(t.key)) {
+      seen.add(t.key);
+      cands.push(t);
+    }
+  };
+  tokens.filter((t) => t.e && t.e.inScope).sort((a, b) => b.e.score - a.e.score).slice(0, 15).forEach(add);
+  tokens.slice().sort((a, b) => b.s.score - a.s.score).slice(0, 10).forEach(add);
+  const stale = (mapName, key, ms) => {
+    const arr = cache[mapName] && cache[mapName].get(key);
+    return !arr || !arr.length || now - arr[arr.length - 1].t >= ms;
+  };
+  let gt = 0;
+  for (const t of cands) {
+    if (gt >= 2 || !stale('holdersHist', t.key, 15 * 60e3) || !stale('holdersMiss', t.key, 15 * 60e3)) continue;
+    try {
+      gt++;
+      const h = await tokenHolders(cfg, t.chain, t.address);
+      if (h) pushHist('holdersHist', t.key, h.count, now);
+      else pushHist('holdersMiss', t.key, 0, now); // brak danych – nie pytamy o ten token przez 15 min
+    } catch (e) {
+      if (e.budget || e.status === 429) break;
+    }
+  }
+  if (!cfg.telegram.token) return;
+  let tgN = 0;
+  for (const t of tokens.slice(0, 30).concat(cands)) {
+    const link = t.socials && t.socials.telegram;
+    if (tgN >= 3 || !link || !stale('tgHist', t.key, 15 * 60e3) || !stale('tgMiss', t.key, 6 * 3.6e6)) continue;
+    tgN++;
+    try {
+      const n = await tgMembers(cfg, link);
+      if (n != null) pushHist('tgHist', t.key, n, now);
+      else pushHist('tgMiss', t.key, 0, now);
+    } catch (e) {
+      pushHist('tgMiss', t.key, 0, now);
+    }
+  }
+}
+
+// Dane dociągane po alercie (nie opóźniają wysłania): posiadacze, transakcje, insiderzy, członkowie Telegrama.
+// Przy pomiarach 1 h / 24 h / 72 h / 7 dni ponownie posiadacze i członkowie – żeby widzieć ich przyrost po alercie.
+async function processEnrich(now) {
+  const q = (state.enrich = (state.enrich || []).filter((it) => now - it.at < 45 * 60e3));
+  if (!q.length) return;
+  const byId = new Map(state.alerts.map((a) => [a.id, a]));
+  let handled = 0;
+  for (const it of q.slice()) {
+    if (handled >= 5) break;
+    const a = byId.get(it.id);
+    if (!a) {
+      it.dropped = true;
+      continue;
+    }
+    handled++;
+    it.done = it.done || {};
+    const res = {};
+    const tryTask = async (name, fn) => {
+      if (it.done[name]) return;
+      try {
+        const v = await fn();
+        it.done[name] = true;
+        if (v != null) Object.assign(res, v);
+      } catch (e) {
+        if (!e.budget && e.status !== 429) it.done[name] = true; // limit: spróbujemy w następnym skanie
+      }
+    };
+    await tryTask('holders', async () => {
+      const h = await tokenHolders(cfg, it.chain, it.address);
+      return h ? { holders: h } : null;
+    });
+    if (it.tag === 'alert') {
+      if (it.pair) await tryTask('trades', async () => {
+        const tr = await poolTrades(cfg, it.chain, it.pair, now);
+        return tr ? { trades: tr } : null;
+      });
+      if (it.chain === 'solana') await tryTask('rug', async () => {
+        const r = await rugcheckReport(cfg, it.address);
+        return r ? { insiders: r } : null;
+      });
+    }
+    if (it.tg && cfg.telegram.token) await tryTask('tg', async () => {
+      const n = await tgMembers(cfg, it.tg);
+      return n != null ? { tgMembers: n } : null;
+    });
+    if (Object.keys(res).length) {
+      a.enrich = a.enrich || {};
+      a.enrich[it.tag] = Object.assign(a.enrich[it.tag] || {}, res, { at: now });
+      logSafe(Object.assign({ t: 'enrich', id: it.id, at: now, tag: it.tag }, res));
+      writeDetail(a);
+      stateDirty = true;
+    }
+    const need = ['holders', it.tag === 'alert' && it.pair ? 'trades' : null, it.tag === 'alert' && it.chain === 'solana' ? 'rug' : null, it.tg && cfg.telegram.token ? 'tg' : null].filter(Boolean);
+    if (need.every((k) => it.done[k])) it.dropped = true;
+  }
+  state.enrich = q.filter((it) => !it.dropped);
+}
+
 function logSafe(o) {
   try {
     calllog.append(o);
@@ -377,6 +543,13 @@ async function scanTokens() {
 
   const { tokens, topics, all, asked } = await collectTokens(cfg, cache, report, extra);
   const now = Date.now();
+  try {
+    const m = await marketContext(cfg, cache);
+    snapshot.market = Object.assign({}, m, { memes: memeHeat(topics.metas) });
+    report('CoinGecko – rynek (BTC, ETH, SOL, BNB)', true, ['btc', 'eth', 'sol', 'bnb'].filter((k) => m[k]).length);
+  } catch (e) {
+    report('CoinGecko – rynek (BTC, ETH, SOL, BNB)', false, 0, e.message);
+  }
   const scope = earlyScope();
   const rescore = (t) => {
     t.s = scoreToken(t, now);
@@ -392,6 +565,7 @@ async function scanTokens() {
     t.firstSeen = state.firstSeen[t.key];
     t.seenMin = state.cold[t.key] ? null : Math.round((now - t.firstSeen) / 60000);
     t.isNew = t.seenMin != null && t.seenMin < 30;
+    t.avgTx = avgTxOf(t);
     rescore(t);
   }
 
@@ -412,6 +586,16 @@ async function scanTokens() {
     const order = tokens.slice().sort((a, b) => cand(b) - cand(a) || Math.max(b.s.momentum, b.e.raw) - Math.max(a.s.momentum, a.e.raw));
     await security.annotate(order, cfg, cache, cfg.security.perScan, report);
     for (const t of tokens) if (t.securityFlags && t.securityFlags.length) rescore(t);
+    // GoPlus podaje liczbę posiadaczy przy kontroli – zapisujemy ją do historii bez dodatkowych zapytań.
+    for (const t of tokens) if (t.secInfo && t.secInfo.holders != null) pushHist('holdersHist', t.key, t.secInfo.holders, now);
+  }
+
+  await sampleCandidates(tokens, now);
+  for (const t of tokens) {
+    const hh = cache.holdersHist && cache.holdersHist.get(t.key);
+    if (hh && hh.length) t.holders = hh[hh.length - 1].c;
+    const th = cache.tgHist && cache.tgHist.get(t.key);
+    if (th && th.length) t.tgMembers = th[th.length - 1].c;
   }
 
   for (const t of tokens) {
@@ -432,7 +616,7 @@ async function scanTokens() {
         const e = await candleExtremes(cfg, a, w.from, w.to);
         a.ext = Object.assign(a.ext || {}, { [w.name]: e || { hi: 0, lo: 0 } });
       } catch (e) {
-        if (e.status === 429) break outer;
+        if (e.status === 429 || e.budget) break outer; // spróbujemy w następnym skanie
         a.ext = Object.assign(a.ext || {}, { [w.name]: { hi: 0, lo: 0 } });
       }
     }
@@ -448,6 +632,9 @@ async function scanTokens() {
     for (const name of Object.keys(a.checks || {})) {
       if (b.keys.includes(name)) continue;
       changed = true;
+      if (a.id && ['h1', 'h24', 'h72', 'd7'].includes(name) && !a.checks[name].missed) {
+        (state.enrich = state.enrich || []).push({ id: a.id, tag: name, at: now, chain: a.chain, address: a.address, pair: a.pair || null, tg: a.tg || null });
+      }
       if (a.id) {
         const extra = name === 'h24' ? { peakAt: a.peakAt, lowAt: a.lowAt, peakMin: a.peakAt ? Math.round((a.peakAt - a.at) / 60000) : null, path: a.path || null } : {};
         // Pole „t” pomiaru to jego godzina – w dzienniku zapisujemy ją jako „ct”, bo „t” oznacza typ linii.
@@ -466,6 +653,17 @@ async function scanTokens() {
   }
   const sentEarly = await tokenAlerts(tokens, now, 'early');
   const sent = await tokenAlerts(tokens, now, 'momentum');
+  await processEnrich(now);
+
+  // Taśma: stan wszystkich ocenianych tokenów co kilka minut.
+  if (cfg.tape.enabled && now - tape.last >= Math.max(1, cfg.tape.intervalMin) * 60e3) {
+    try {
+      const bytes = tape.write(now, tokens, snapshot.market);
+      report('Taśma skanów (kB na zapis)', true, Math.round(bytes / 1024));
+    } catch (e) {
+      report('Taśma skanów (kB na zapis)', false, 0, e.message);
+    }
+  }
 
   // Lista obserwowanych: tokeny z sensowną płynnością i obrotem, najwyżej 48 h od pierwszego pojawienia.
   const W = cfg.watch;
@@ -576,6 +774,28 @@ async function scanNfts() {
 
 let lastNft = 0;
 let timer = null;
+// Codzienna kopia danych (o godzinie backup.hour czasu lokalnego, raz na dobę).
+const backupSrc = () => (process.env.RADAR_CONFIG ? path.dirname(CONFIG_PATH) : null);
+async function maybeBackup() {
+  const B = cfg.backup;
+  const src = backupSrc();
+  if (!B.enabled || !src) return;
+  const d = new Date();
+  const day = d.toISOString().slice(0, 10);
+  if (state.lastBackupDay === day || d.getHours() < (B.hour || 0)) return;
+  state.lastBackupDay = day;
+  stateDirty = true;
+  const dir = B.dir || path.join(path.dirname(src), 'krypto-radar-kopie');
+  try {
+    const r = await backup(src, dir, B.keep || 14);
+    report('Kopia danych (MB)', true, Math.round(r.bytes / 1048576));
+    log(`Kopia danych: ${r.file} (${Math.round(r.bytes / 1024)} kB)`);
+  } catch (e) {
+    report('Kopia danych (MB)', false, 0, e.message);
+    log('Kopia danych nie powiodła się: ' + e.message);
+  }
+}
+
 async function cycle() {
   if (snapshot.scanning) return;
   snapshot.scanning = true;
@@ -593,6 +813,12 @@ async function cycle() {
     await maybePublish();
   } catch (e) {
     log('Błąd publikacji: ' + e.message);
+  }
+  try {
+    await maybeBackup();
+    if (cfg.health.enabled && telegramReady()) for (const msg of health.check([...status.values()])) await deliver(msg);
+  } catch (e) {
+    log('Błąd kopii lub pilnowania: ' + e.message);
   } finally {
     snapshot.scanning = false;
     clearTimeout(timer);
@@ -632,6 +858,8 @@ function stateJson(forSite) {
     nfts: snapshot.nfts,
     topics: snapshot.topics,
     alertsCount: { day: state.alerts.filter((a) => Date.now() - a.at < 864e5).length, total: calllog.calls.size },
+    market: snapshot.market || null,
+    appVersion: APP_VERSION,
     counts: snapshot.counts || null,
     sources: [...status.values()],
     scannedAt: snapshot.scannedAt,
@@ -1058,6 +1286,7 @@ function start() {
     }
     await waitForClock();
     STARTED = Date.now();
+    setBudget('gt', cfg.gtPerMin);
     if (backfillAlerts()) for (const a of state.alerts) writeDetail(a);
     cycle();
     tgbot.startPolling({
