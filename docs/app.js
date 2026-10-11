@@ -47,7 +47,7 @@ const PARTS = [['vol', 'Przyspieszenie wolumenu', 28], ['act', 'Aktywność', 20
 const EPARTS = [['demand', 'Rosnący popyt', 30, 'vol'], ['buyers', 'Kupujący', 20, 'buy'], ['room', 'Zapas ceny', 20, 'price'], ['value', 'Wycena', 15, 'act'], ['fresh', 'Świeżość', 15, 'attn']];
 const isEarly = () => ui.tab === 'early';
 
-const ui = { tab: 'early', q: '', chain: '', minLiq: 0, hideCrit: true, sort: 'score', meta: '', open: new Set(), settingsBuilt: false };
+const ui = { tab: 'early', q: '', chain: '', minLiq: 0, hideCrit: true, sort: 'score', meta: '', open: new Set(), openAlerts: new Set(), settingsBuilt: false };
 let S = null;
 
 // ---- Skąd dane -------------------------------------------------------------
@@ -106,6 +106,7 @@ async function load() {
     $('scanNow').hidden = !!REMOTE;
     if (document.activeElement && document.activeElement.tagName === 'SELECT') renderTop();
     else render();
+    if (ui.tab === 'alerts') loadAlerts();
   } catch (e) {
     $('when').textContent = REMOTE
       ? (/Brak danych/.test(e.message) ? e.message : 'Nie udało się pobrać danych z GitHuba – spróbuję ponownie za chwilę.')
@@ -399,24 +400,145 @@ function renderAlerts() {
 
   const when = (t) => new Date(t).toLocaleString('pl-PL', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' });
   const KIND = { early: 'wczesny', momentum: 'gorący' };
-  const rows = S.alerts.map((a) => el('tr', { class: 'row r-' + (a.risk || 'none'), style: 'cursor:default' },
-    el('td', { class: 'l', text: when(a.at) }),
-    el('td', { class: 'l', style: 'font-family:var(--ui)' }, link(a.url, a.symbol) || a.symbol, a.chain ? el('span', { class: 'chain', text: a.chain }) : null),
-    el('td', { class: 'l', style: 'font-family:var(--ui)', text: a.type === 'nft' ? 'NFT' : KIND[a.kind || 'momentum'] }),
-    el('td', { text: Math.round(a.score) }),
-    el('td', { text: tracked(a) ? price(a.price0) : '–' }),
-    el('td', null, chk(a, 'h1')), el('td', null, chk(a, 'h6')), el('td', null, chk(a, 'h24')),
-    el('td', null, tracked(a) && a.peak > 0 ? pct((a.peak / a.price0 - 1) * 100) : el('span', { class: 'mute', text: '–' })),
-    el('td', { class: 'l', style: 'font-family:var(--ui);font-size:13px' }, el('span', { class: a.sent ? 'up' : 'mute', text: a.sent ? 'wysłano' : a.error || 'nie wysłano' }))));
+  // Pełna lista z wynikami i szczegółami (alerts.json); do czasu jej pobrania – skrócona z danych strony.
+  const all = (ALERTS && ALERTS.alerts) || S.alerts;
+  ui.alertKind = ui.alertKind || '';
+  const list = all.filter((a) => !ui.alertKind || (ui.alertKind === 'nft' ? a.type === 'nft' : a.type !== 'nft' && (a.kind || 'momentum') === ui.alertKind));
+  const akey = (a) => a.id || a.at + ':' + a.symbol;
+  const rows = [];
+  for (const a of list) {
+    const open = ui.openAlerts.has(akey(a));
+    const toggle = () => { open ? ui.openAlerts.delete(akey(a)) : ui.openAlerts.add(akey(a)); render(); };
+    rows.push(el('tr', { class: 'row r-' + (a.risk || 'none'), tabindex: '0', 'aria-expanded': String(open), onclick: toggle, onkeydown: (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggle(); } } },
+      el('td', { class: 'l', text: when(a.at) }),
+      el('td', { class: 'l', style: 'font-family:var(--ui)' }, el('b', { text: a.symbol }), a.chain ? el('span', { class: 'chain', text: a.chain }) : null),
+      el('td', { class: 'l', style: 'font-family:var(--ui)', text: a.type === 'nft' ? 'NFT' : KIND[a.kind || 'momentum'] }),
+      el('td', { text: Math.round(a.score) }),
+      el('td', { text: tracked(a) ? price(a.price0) : '–' }),
+      el('td', null, chk(a, 'h1')), el('td', null, chk(a, 'h6')), el('td', null, chk(a, 'h24')),
+      el('td', null, tracked(a) && a.peak > 0 ? pct((a.peak / a.price0 - 1) * 100) : el('span', { class: 'mute', text: '–' })),
+      el('td', { class: 'l', style: 'font-family:var(--ui);font-size:13px' }, el('span', { class: a.sent ? 'up' : 'mute', text: a.sent ? 'wysłano' : a.error || 'nie wysłano' }))));
+    if (open) rows.push(el('tr', { class: 'detail' }, el('td', { colspan: '10' }, alertDetail(a))));
+  }
   const E = S.config.early;
+  const chip = (v, label) => el('button', { class: 'topic', 'aria-pressed': String(ui.alertKind === v), style: 'padding:4px 12px', onclick: () => { ui.alertKind = v; render(); } }, el('div', { class: 'nm', text: label }));
   put(view, stats,
     el('h2', { style: 'font:600 15px/1.2 var(--ui);margin:0 0 8px', text: 'Alerty' }),
+    el('div', { class: 'filters', style: 'margin-bottom:8px' }, chip('', 'Wszystkie'), chip('early', 'Wczesne'), chip('momentum', 'Gorące'), chip('nft', 'NFT'),
+      el('span', { class: 'mute', style: 'font-size:13px', text: 'Kliknij alert, żeby zobaczyć wykres ceny, powód wysłania i wyniki.' })),
     tgOn ? null : el('p', { class: 'mute', style: 'margin:0 0 8px', text: 'Telegram nie jest połączony, więc alerty zapisują się tylko tutaj. Połącz go w zakładce Ustawienia.' }),
-    el('div', { class: 'tablewrap' }, S.alerts.length
+    el('div', { class: 'tablewrap' }, list.length
       ? el('table', null,
           el('thead', null, el('tr', null, ['Czas', 'Token', 'Rodzaj', 'Wynik', 'Cena przy alercie', 'Po 1 h', 'Po 6 h', 'Po 24 h', 'Szczyt', 'Telegram'].map((h, i) => el('th', { class: i < 3 || i === 9 ? 'l' : '', text: h })))),
           el('tbody', null, rows))
-      : el('div', { class: 'empty', text: `Jeszcze żadnego. Wczesny sygnał powstaje od wyniku ${E.minScore}, alert „gorący” od ${S.config.alerts.minScore}; token z krytyczną flagą nie wywołuje żadnego.` })));
+      : el('div', { class: 'empty', text: all.length ? 'Brak alertów tego rodzaju.' : `Jeszcze żadnego. Wczesny sygnał powstaje od wyniku ${E.minScore}, alert „gorący” od ${S.config.alerts.minScore}; token z krytyczną flagą nie wywołuje żadnego.` })));
+}
+
+// ---- Szczegóły pojedynczego alertu --------------------------------------------
+
+// Wykres zmiany ceny w % od chwili alertu (0–24 h), z oznaczeniem pomiarów po 1, 6 i 24 h.
+function priceChart(a) {
+  const NS = 'http://www.w3.org/2000/svg';
+  const svg = (tag, attrs) => { const n = document.createElementNS(NS, tag); for (const k in attrs) n.setAttribute(k, attrs[k]); return n; };
+  const pts = (a.path || []).map(([m, p]) => [m, (p / a.price0 - 1) * 100]);
+  for (const [name, c] of Object.entries(a.checks || {})) if (c && c.t && Number.isFinite(c.chg)) pts.push([Math.round((c.t - a.at) / 60000), c.chg]);
+  pts.sort((x, y) => x[0] - y[0]);
+  if (pts.length < 2) return el('p', { class: 'mute', text: 'Wykres pojawi się po pierwszych 15 minutach od alertu.' });
+  const W = 340, Hh = 130, padL = 38, padB = 18, padT = 8;
+  const ys = pts.map((p) => p[1]).concat(0);
+  let lo = Math.min(...ys), hi = Math.max(...ys);
+  if (hi - lo < 10) { const mid = (hi + lo) / 2; lo = mid - 5; hi = mid + 5; }
+  const X = (m) => padL + (Math.min(m, 1440) / 1440) * (W - padL - 6);
+  const Y = (v) => padT + (1 - (v - lo) / (hi - lo)) * (Hh - padT - padB);
+  const root = svg('svg', { viewBox: `0 0 ${W} ${Hh}`, width: '100%', style: 'max-width:420px;display:block', role: 'img', 'aria-label': 'Zmiana ceny od alertu w ciągu 24 godzin' });
+  const txt = (x, y, s, anchor) => { const t = svg('text', { x, y, 'font-size': '10', fill: 'var(--muted)', 'text-anchor': anchor || 'start' }); t.textContent = s; return t; };
+  for (const [m, label, anchor] of [[60, '1 h', 'start'], [360, '6 h', 'middle'], [1440, '24 h', 'end']]) {
+    root.append(svg('line', { x1: X(m), x2: X(m), y1: padT, y2: Hh - padB, stroke: 'var(--line)', 'stroke-width': '1' }));
+    root.append(txt(X(m) + (anchor === 'start' ? 2 : 0), Hh - 5, label, anchor));
+  }
+  root.append(svg('line', { x1: padL, x2: W - 6, y1: Y(0), y2: Y(0), stroke: 'var(--muted)', 'stroke-dasharray': '3 3', 'stroke-width': '1' }));
+  // Podpisy osi Y: 0% zawsze, góra i dół tylko gdy nie nachodzą na 0%.
+  root.append(txt(padL - 4, Y(0) + 3, '0%', 'end'));
+  if (Y(0) - Y(hi) > 14) root.append(txt(padL - 4, Y(hi) + 8, (hi > 0 ? '+' : '') + Math.round(hi) + '%', 'end'));
+  if (Y(lo) - Y(0) > 14) root.append(txt(padL - 4, Y(lo), Math.round(lo) + '%', 'end'));
+  const last = pts[pts.length - 1][1];
+  root.append(svg('polyline', { points: pts.map(([m, v]) => `${X(m).toFixed(1)},${Y(v).toFixed(1)}`).join(' '), fill: 'none', stroke: last >= 0 ? 'var(--up)' : 'var(--down)', 'stroke-width': '2', 'stroke-linejoin': 'round' }));
+  for (const [name, c] of Object.entries(a.checks || {})) {
+    if (!c || !c.t || !Number.isFinite(c.chg)) continue;
+    root.append(svg('circle', { cx: X((c.t - a.at) / 60000), cy: Y(c.chg), r: '3.5', fill: 'var(--surface)', stroke: 'var(--ink)', 'stroke-width': '1.5' }));
+  }
+  return root;
+}
+
+function alertDetail(a) {
+  const d = a.d || {};
+  const ago = (t) => (t ? (t - a.at < 3.6e6 ? Math.round((t - a.at) / 60000) + ' min' : nf({ maximumFractionDigits: 1 }).format((t - a.at) / 3.6e6) + ' h') : '–');
+  const li = (label, ...val) => el('li', null, el('span', { class: 'mute', text: label + ': ' }), ...val);
+  if (a.type === 'nft') {
+    return el('div', { class: 'dgrid' },
+      el('div', null, el('h3', { text: 'Kolekcja NFT w chwili alertu' }), el('ul', null,
+        li('Floor', d.floor == null ? '–' : `${d.floor} ${d.currency || ''}`), li('Sprzedaże 24 h', String(d.sales1d ?? '–')), li('Wolumen 24 h / 7 dni', `${d.vol1d ?? '–'} / ${d.vol7d ?? '–'}`),
+        li('Posiadaczy', String(d.owners ?? '–')), li('Pozycja w trendach 1 h / 24 h', `${d.rank1h || '–'} / ${d.rank1d || '–'}`))),
+      el('div', null, el('h3', { text: 'Linki' }), el('div', { class: 'links' }, link(a.url, 'OpenSea'))));
+  }
+  const res = (name, label) => {
+    const c = a.checks && a.checks[name];
+    if (!c) return li(label, el('span', { class: 'mute', text: 'czekam' }));
+    if (c.missed) return li(label, el('span', { class: 'mute', text: 'pominięty (aplikacja nie działała)' }));
+    if (c.dead) return li(label, el('span', { class: 'down', text: 'token zniknął (−100%)' }));
+    return li(label, pct(c.chg), c.p ? ` – ${price(c.p)}` : '', c.rug ? el('span', { class: 'down', text: ' – płynność wycofana' }) : '');
+  };
+  const peakPct = a.peak > 0 ? (a.peak / a.price0 - 1) * 100 : null;
+  const lowPct = a.low > 0 ? (a.low / a.price0 - 1) * 100 : null;
+  const results = el('div', null, el('h3', { text: a.done ? 'Wyniki (zamknięte po 24 h)' : 'Wyniki (pomiar trwa)' }),
+    priceChart(a),
+    el('ul', { style: 'margin-top:8px' },
+      res('h1', 'Po 1 h'), res('h6', 'Po 6 h'), res('h24', 'Po 24 h'),
+      li('Szczyt', peakPct == null ? '–' : pct(peakPct), a.peakAt && a.peakAt > a.at ? ` po ${ago(a.peakAt)}` : ''),
+      li('Dołek', lowPct == null ? '–' : pct(lowPct), a.lowAt && a.lowAt > a.at ? ` po ${ago(a.lowAt)}` : '')));
+  const u = d.uniq;
+  const atAlert = el('div', null, el('h3', { text: 'Stan w chwili alertu' }), el('ul', null,
+    li('Cena', price(a.price0)), li('Płynność', usd(d.liq ?? a.liq0)), li('Wycena', usd(d.mc ?? a.mc0)),
+    li('Wolumen 1 h / 24 h', `${usd(d.vol && d.vol.h1)} / ${usd(d.vol && d.vol.h24)}`),
+    li('Zmiana ceny 1 h / 6 h / 24 h', pct(d.chg && d.chg.h1), ' / ', pct(d.chg && d.chg.h6), ' / ', pct(d.chg && d.chg.h24)),
+    li('Wiek tokena', ageTxt(d.ageH)),
+    li('Kupujący w 1 h', d.buyRatio == null ? '–' : `${Math.round(d.buyRatio * 100)}% z ${d.tx1} transakcji` + (u ? ` (portfele: ${u.buyers} kup. / ${u.sellers} sprz.)` : '')),
+    li('Kontrakt', { checked: 'sprawdzony', failed: 'nie udało się sprawdzić', unsupported: 'niesprawdzony – sieć nieobsługiwana' }[d.security] || '–')));
+  const isE = (a.kind || 'momentum') === 'early';
+  const sc = isE ? d.early : d.momentum;
+  const why = el('div', null, el('h3', { text: `Dlaczego alert: wynik ${Math.round(a.score)}` + (d.threshold != null ? ` (próg ${d.threshold})` : '') }),
+    sc && sc.parts ? el('div', { class: 'parts' }, (isE ? EPARTS : PARTS).flatMap(([k, n, max, c]) => [el('span', { text: n }), el('div', { class: 'pb' }, el('span', { style: `width:${Math.min(100, (100 * (sc.parts[k] || 0)) / max)}%;background:var(--p-${c || k})` })), el('span', { class: 'pv', text: `${sc.parts[k] ?? 0} / ${max}` })])) : el('p', { class: 'mute', text: 'Szczegóły wyniku są tylko dla alertów zapisanych w dzienniku.' }),
+    sc && isE && (sc.late || sc.penalty) ? el('p', { class: 'mute', style: 'margin:6px 0 0;font-size:13px', text: `Odjęto: ${sc.penalty || 0} za flagi, ${sc.late || 0} za wzrost, który już był.` }) : null,
+    el('h3', { style: 'margin-top:10px', text: 'Flagi ryzyka: ' + (RISK[a.risk] || '–') }),
+    el('ul', null, (d.flags || []).length ? d.flags.map((f) => el('li', { class: f.sev, text: f.text })) : el('li', { class: 'info', text: d.flags ? 'Żadna reguła nie zadziałała.' : '–' })));
+  const srcs = (d.sources || []).map((x) => SRC[x] || x).concat((d.metas || []).map((m) => 'narracja „' + m + '”'));
+  const links = el('div', null, el('h3', { text: 'Gdzie był widoczny' }),
+    el('ul', null, srcs.length ? srcs.map((x) => el('li', { text: x })) : el('li', { class: 'info', text: '–' })),
+    el('h3', { style: 'margin-top:10px', text: 'Linki' }),
+    el('div', { class: 'links' }, link(a.url, 'Wykres'), link(d.pumpUrl, 'pump.fun')),
+    d.address ? el('div', { class: 'addr', style: 'margin-top:8px', text: d.address }) : null,
+    d.address ? el('button', { class: 'linkbtn', style: 'font-size:13px', text: 'Kopiuj adres', onclick: (e) => { e.stopPropagation(); navigator.clipboard.writeText(d.address).then(() => { e.target.textContent = 'Skopiowano'; }); } }) : null);
+  return el('div', { class: 'dgrid' }, results, why, atAlert, links);
+}
+
+// Szczegóły alertów: lokalnie /api/alerts, na GitHubie alerts.json z tego samego commita co data.json.
+let ALERTS = null, alertsSha = null;
+async function loadAlerts() {
+  try {
+    if (!REMOTE) ALERTS = await toLogin(await fetch('/api/alerts', { cache: 'no-store' })).json();
+    else if (REMOTE.url) ALERTS = await (await fetch(REMOTE.url.replace(/data\.json(\?.*)?$/, 'alerts.json'), { cache: 'no-store' })).json();
+    else {
+      const ref = lastSha || REMOTE.branch;
+      if (ref === alertsSha && ALERTS) return;
+      const r = await fetch(`https://raw.githubusercontent.com/${REMOTE.owner}/${REMOTE.repo}/${ref}/alerts.json` + (lastSha ? '' : '?t=' + Math.floor(Date.now() / 60000)));
+      if (!r.ok) return;
+      ALERTS = await r.json();
+      alertsSha = ref;
+    }
+  } catch (e) {
+    // brak pliku (starsza wersja na Orange Pi) – zostaje skrócona lista z data.json
+  }
+  if (ui.tab === 'alerts' && S) render();
 }
 
 // Na GitHubie ustawienia tylko pokazujemy – zmienia się je komendami w Telegramie
@@ -553,7 +675,7 @@ function updateTgStatus() {
   else { p.textContent = 'Bot nie jest jeszcze podłączony.'; p.className = 'mute'; }
 }
 
-for (const b of document.querySelectorAll('.tab')) b.addEventListener('click', () => { ui.tab = b.dataset.tab; if (S) render(); });
+for (const b of document.querySelectorAll('.tab')) b.addEventListener('click', () => { ui.tab = b.dataset.tab; if (S) render(); if (ui.tab === 'alerts' && S) loadAlerts(); });
 $('srcToggle').addEventListener('click', () => { const open = $('sources').classList.toggle('open'); $('srcToggle').setAttribute('aria-expanded', String(open)); });
 $('logout').addEventListener('click', async () => { try { await fetch('/logout', { method: 'POST' }); } catch (e) {} location.href = '/login'; });
 $('scanNow').addEventListener('click', async () => { $('scanNow').disabled = true; try { await post('/api/scan'); } catch (e) {} setTimeout(load, 1500); });
