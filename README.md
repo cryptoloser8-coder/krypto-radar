@@ -180,6 +180,20 @@ Taśma jest kopiowana osobno do `~/krypto-radar-kopie/tape/` (każdy dzień raz)
 chroni przed jej awarią** – ustaw `backup.dir` w `~/krypto-radar-dane/config.json` na pendrive albo dysk sieciowy
 i zrestartuj usługę.
 
+## Alerty do grupy na Telegramie
+
+Alerty mogą przychodzić do grupy (także do wybranego tematu w grupie z tematami) zamiast do prywatnej rozmowy:
+
+1. Dodaj bota do grupy i daj mu prawo pisania (w grupie z tematami – także w wybranym temacie).
+2. W tej grupie, w wybranym temacie, wyślij ze swojego konta `/tutaj`.
+
+Od tej chwili alerty (tokeny, wczesne sygnały, NFT) idą tam. Ostrzeżenia o źródłach, które nie działają, dalej przychodzą
+prywatnie. Komendy działają w grupie tylko z Twojego konta (to samo konto, które sparowało bota) – wiadomości innych
+członków bot pomija; nie pisz jako anonimowy administrator, bo wtedy Telegram ukrywa, kto pisze. Odpowiedź na komendę
+przychodzi tam, gdzie ją wysłano. `/tutaj` w prywatnej rozmowie z botem przywraca alerty do niej, a `/status` mówi,
+dokąd teraz idą. Gdy grupa przestanie przyjmować wiadomości (bot usunięty, brak prawa pisania), alerty wracają
+do prywatnej rozmowy z ostrzeżeniem – nic nie ginie.
+
 ## Solana osobno
 
 Tokenów z Solany jest najwięcej, więc domyślnie mają **osobną zakładkę „Solana”** (wczesne sygnały, gorące, pump.fun
