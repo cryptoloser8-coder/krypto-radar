@@ -392,6 +392,55 @@ async function integration() {
       ws = (await fetch(base + '/__sent').then((r) => r.json())).slice(nSent3);
     }
     assert.ok(ws.length && /24 h, tylko Solana/.test(ws[0].text) && /Gorące<\/b> – 1 alertów/.test(ws[0].text), ws[0] && ws[0].text);
+
+    // Alerty do grupy: /tutaj w temacie grupy (tylko z konta właściciela), komendy obcych i do innych botów pomijane.
+    const tgPush = (o) => fetch(`${base}/__tgpush?` + new URLSearchParams(o));
+    const waitSent = async (from, n = 1) => {
+      let x = [];
+      for (let i = 0; i < 40 && x.length < n; i++) {
+        await sleep(250);
+        x = (await fetch(base + '/__sent').then((r) => r.json())).slice(from);
+      }
+      return x;
+    };
+    const cfgTg = () => JSON.parse(fs.readFileSync(path.join(dir, 'config.json'), 'utf8')).telegram;
+    let n0 = (await fetch(base + '/__sent').then((r) => r.json())).length;
+    await tgPush({ chat: -100777, type: 'supergroup', from: 999, title: 'Grupa', text: '/tutaj' }); // obcy w grupie
+    await tgPush({ chat: -100777, type: 'supergroup', from: 424242, title: 'Grupa', text: '/status@inny_bot' }); // do innego bota
+    await tgPush({ chat: -100777, type: 'supergroup', from: 424242, title: 'Grupa', thread: 42, text: '/tutaj@kryptoradar_test_bot' });
+    let g = await waitSent(n0);
+    await sleep(800);
+    g = (await fetch(base + '/__sent').then((r) => r.json())).slice(n0);
+    assert.strictEqual(g.length, 1, 'tylko odpowiedź na /tutaj właściciela: ' + JSON.stringify(g.map((m) => [m.chat_id, m.text.slice(0, 30)])));
+    assert.ok(g[0].chat_id === -100777 && g[0].message_thread_id === 42 && /Od teraz alerty przychodzą tutaj, do tego tematu/.test(g[0].text), JSON.stringify(g[0]));
+    assert.deepStrictEqual(cfgTg().alertChat, { id: -100777, thread: 42, title: 'Grupa' });
+    n0 += 1;
+    await fetch(`http://127.0.0.1:${APP}/api/telegram/test`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' });
+    g = await waitSent(n0);
+    assert.ok(g[0] && g[0].chat_id === -100777 && g[0].message_thread_id === 42 && /Test/.test(g[0].text), 'alert do tematu grupy: ' + JSON.stringify(g[0]));
+    // Komenda właściciela w grupie: odpowiedź w tej grupie; /status mówi, dokąd idą alerty.
+    n0 = (await fetch(base + '/__sent').then((r) => r.json())).length;
+    await tgPush({ chat: -100777, type: 'supergroup', from: 424242, title: 'Grupa', thread: 42, text: '/status' });
+    g = await waitSent(n0);
+    assert.ok(g[0].chat_id === -100777 && /Alerty idą do grupy „Grupa” \(wybrany temat\)/.test(g[0].text), g[0].text);
+    // Grupa, która nie przyjmuje wiadomości: alert idzie prywatnie z ostrzeżeniem.
+    await tgPush({ chat: -100999, type: 'supergroup', from: 424242, title: 'Stara', text: '/tutaj' });
+    for (let i = 0; i < 40 && cfgTg().alertChat.id !== -100999; i++) await sleep(250);
+    n0 = (await fetch(base + '/__sent').then((r) => r.json())).length;
+    await fetch(`http://127.0.0.1:${APP}/api/telegram/test`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' });
+    g = await waitSent(n0);
+    assert.ok(g[0] && String(g[0].chat_id) === '424242' && /Nie mogę pisać do grupy „Stara”/.test(g[0].text) && /Test/.test(g[0].text), JSON.stringify(g[0]));
+    // Zwykła grupa zmieniona w supergrupę: nowy numer zapisany, wiadomość wychodzi.
+    await tgPush({ chat: -555, type: 'group', from: 424242, title: 'Mała', text: '/tutaj' });
+    for (let i = 0; i < 40 && cfgTg().alertChat.id !== -555; i++) await sleep(250);
+    n0 = (await fetch(base + '/__sent').then((r) => r.json())).length;
+    await fetch(`http://127.0.0.1:${APP}/api/telegram/test`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' });
+    g = await waitSent(n0);
+    assert.ok(g[0] && g[0].chat_id === -100555 && cfgTg().alertChat.id === -100555, JSON.stringify(g[0]));
+    // /tutaj w prywatnej rozmowie: alerty z powrotem prywatnie.
+    await tgPush({ chat: 424242, text: '/tutaj' });
+    for (let i = 0; i < 40 && cfgTg().alertChat; i++) await sleep(250);
+    assert.strictEqual(cfgTg().alertChat, null);
     assert.ok(docs.length === 1 && /krypto-radar-alerty-.*\.csv/.test(docs[0]) && /id;czas;rodzaj;symbol/.test(docs[0]) && /EARLY/.test(docs[0]) && /posiadacze przy alercie/.test(docs[0]));
 
     console.log('✓ całość: źródła, łączenie danych, flagi, alerty, publikacja na GitHub, komendy Telegram, dziennik');
