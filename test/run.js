@@ -235,9 +235,10 @@ async function integration() {
     assert.ok(sent.length && sent.every((m) => String(m.chat_id) === '424242'), 'wiadomości poszły do: ' + [...new Set(sent.map((m) => m.chat_id))]);
     const savedCfg = JSON.parse(fs.readFileSync(path.join(dir, 'config.json'), 'utf8'));
     assert.strictEqual(savedCfg.telegram.pairCode, '', 'kod parowania powinien zostać zużyty');
+    // GOOD (Solana): alert „gorący” jest, ale wyciszony – bez wiadomości, tylko zapis i pomiar (domyślnie Solana osobno).
     const alerts = sent.filter((m) => m.text.startsWith('🚨'));
-    assert.strictEqual(alerts.length, 1, 'alerty: ' + alerts.map((a) => a.text.split('\n')[0]).join(' | '));
-    assert.ok(/GOOD/.test(alerts[0].text));
+    assert.strictEqual(alerts.length, 0, 'alerty: ' + alerts.map((a) => a.text.split('\n')[0]).join(' | '));
+    assert.ok(/Alert: GOOD \(solana\).*wyciszony/.test(out), out);
     // …i dokładnie jeden wczesny sygnał (EARLY). GOOD jest już „gorący”, więc wczesnego nie dostaje.
     const earlyMsgs = sent.filter((m) => m.text.startsWith('🌱'));
     assert.strictEqual(earlyMsgs.length, 1, 'wczesne: ' + earlyMsgs.map((a) => a.text.split('\n')[0]).join(' | '));
@@ -265,6 +266,7 @@ async function integration() {
     assert.ok(detE.d.tg && detE.d.tg.s === 'public' && detE.d.tg.title === 'EARLY Portal');
     assert.strictEqual(enE.tgStatus, 'public');
     const goodAlert = live.find((a) => a.symbol === 'GOOD' && a.kind === 'momentum');
+    assert.ok(goodAlert.muted && !goodAlert.sent, 'GOOD wyciszony, ale zapisany');
     const detG = await fetchJson(`http://127.0.0.1:${APP}/api/alert?id=${goodAlert.id}`);
     assert.ok(detG.enrich.alert.insiders && detG.enrich.alert.insiders.insidersDetected === 7 && detG.enrich.alert.insiders.lpLockedPct === 99.5);
     assert.ok(detG.d.secInfo && detG.d.secInfo.src === 'rugcheck', 'dane z kontroli RugCheck w obrazie alertu');
@@ -313,7 +315,7 @@ async function integration() {
     await fetch(`http://127.0.0.1:${APP}/api/scan`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' });
     await sleep(4000);
     const sent2 = await fetch(base + '/__sent').then((r) => r.json());
-    assert.strictEqual(sent2.filter((m) => m.text.startsWith('🚨')).length, 1);
+    assert.strictEqual(sent2.filter((m) => m.text.startsWith('🚨')).length, 0);
     assert.strictEqual(sent2.filter((m) => m.text.startsWith('🌱')).length, 1);
     // Publikacja: data.json na gałęzi „data”, jeden commit bez historii, bez żadnych sekretów.
     const gitR = (...a) => execFileSync('git', ['--git-dir', bare, ...a]).toString();
@@ -340,6 +342,7 @@ async function integration() {
     assert.strictEqual(replies.length, 4, 'odpowiedzi: ' + JSON.stringify(replies.map((r) => r.text.slice(0, 40))));
     assert.ok(replies.every((r) => String(r.chat_id) === '424242'), 'obcy nie może dostać odpowiedzi');
     assert.ok(/52/.test(replies[0].text) && /poza dozwolonym zakresem/.test(replies[1].text) && /solana, base/.test(replies[2].text) && /Krypto Radar/.test(replies[3].text));
+    assert.ok(/Solana \(osobno, bez powiadomień\): 3 alertów w 24 h/.test(replies[3].text) && /Alertów w 24 h: 1/.test(replies[3].text), replies[3].text);
     const cfgNow = (await fetch(`http://127.0.0.1:${APP}/api/state`).then((r) => r.json())).config;
     assert.strictEqual(cfgNow.early.minScore, 52, 'obcy nie może zmienić ustawień');
     assert.deepStrictEqual(cfgNow.alerts.chains, ['solana', 'base']);
@@ -364,7 +367,12 @@ async function integration() {
     assert.ok(ce.id && ce.price > 0 && ce.liquidityUsd === 60000 && ce.early.parts.demand > 0 && ce.vol.h1 === 12000 && ce.uniq.h1.buyers === 70 && ce.settings.early.minScore === 45 && ce.threshold === 45, JSON.stringify(ce).slice(0, 300));
     assert.ok(!JSON.stringify(logLines).includes('AAAAAAAAAAAA'));
     const pub2 = JSON.parse(gitR('show', 'data:data.json'));
-    assert.ok(pub2.alertsCount && pub2.alertsCount.day === 4 && pub2.alertsCount.total === 5, JSON.stringify(pub2.alertsCount));
+    // Solana liczona osobno: w głównym widoku tylko EARLY (base), w zakładce Solana: GOOD, GONE i wcześniejszy GOOD.
+    assert.ok(pub2.alertsCount && pub2.alertsCount.day === 1 && pub2.alertsCount.sol === 3 && pub2.alertsCount.total === 5, JSON.stringify(pub2.alertsCount));
+    assert.deepStrictEqual(pub2.config.solana, { separate: true, telegram: false });
+    const pubIdx2 = JSON.parse(gitR('show', 'data:alerts-index.json'));
+    const goodRow = pubIdx2.rows.find((r) => r.s === 'GOOD' && r.t === 'm');
+    assert.ok(goodRow && goodRow.mu === 1 && goodRow.se === 0, JSON.stringify(goodRow));
     assert.ok(!('alerts' in pub2) && !('history' in pub2), 'lista alertów jest w osobnych plikach');
     const nSent2 = (await fetch(base + '/__sent').then((r) => r.json())).length;
     await tgSay(424242, '/wyniki 24h');
@@ -375,7 +383,15 @@ async function integration() {
       docs = await fetch(base + '/__docs').then((r) => r.json());
     }
     const wyn = (await fetch(base + '/__sent').then((r) => r.json())).slice(nSent2);
-    assert.ok(wyn.length && /Skuteczność – 24 h/.test(wyn[0].text) && /Wczesne<\/b> – 3 alertów/.test(wyn[0].text), wyn[0] && wyn[0].text);
+    assert.ok(wyn.length && /Skuteczność – 24 h, bez Solany/.test(wyn[0].text) && /Wczesne<\/b> – 1 alertów/.test(wyn[0].text), wyn[0] && wyn[0].text);
+    const nSent3 = (await fetch(base + '/__sent').then((r) => r.json())).length;
+    await tgSay(424242, '/wyniki solana 24h');
+    let ws = [];
+    for (let i = 0; i < 40 && !ws.length; i++) {
+      await sleep(250);
+      ws = (await fetch(base + '/__sent').then((r) => r.json())).slice(nSent3);
+    }
+    assert.ok(ws.length && /24 h, tylko Solana/.test(ws[0].text) && /Gorące<\/b> – 1 alertów/.test(ws[0].text), ws[0] && ws[0].text);
     assert.ok(docs.length === 1 && /krypto-radar-alerty-.*\.csv/.test(docs[0]) && /id;czas;rodzaj;symbol/.test(docs[0]) && /EARLY/.test(docs[0]) && /posiadacze przy alercie/.test(docs[0]));
 
     console.log('✓ całość: źródła, łączenie danych, flagi, alerty, publikacja na GitHub, komendy Telegram, dziennik');
@@ -560,6 +576,7 @@ async function access() {
     port: PORT, scanIntervalSec: 3600, nftIntervalSec: 3600,
     auth: { passwordHash: h, secret: sec },
     telegram: { token: '123456789:BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB', chatId: '555' }, // osobna rozmowa niż w teście wyżej
+    solana: { telegram: true }, // tu Solana z powiadomieniami (sprawdzamy ponowienie nieudanej wysyłki)
     api: { dexscreener: base + '/ds', geckoterminal: base + '/gt', coingecko: base + '/cg', pumpfun: base + '/pf', opensea: base + '/os', rugcheck: base + '/rc', goplus: base + '/gp', telegram: base + '/tg' },
   }, extra || {}));
   fs.writeFileSync(path.join(dir, 'config.json'), conf());
