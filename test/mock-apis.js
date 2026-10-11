@@ -173,7 +173,10 @@ const routes = [
   }],
   [/^\/tg\/bot([^/]+)\/setMyCommands$/, () => ({ ok: true, result: true })],
   [/^\/__tgpush$/, (m, q) => {
-    updates.push({ update_id: updates.length + 1, message: { date: Math.floor(Date.now() / 1000) - (+q.get('age') || 0), chat: { id: +q.get('chat'), type: 'private', first_name: 'x' }, text: q.get('text') } });
+    const type = q.get('type') || 'private';
+    const msg = { date: Math.floor(Date.now() / 1000) - (+q.get('age') || 0), chat: type === 'private' ? { id: +q.get('chat'), type, first_name: 'x' } : { id: +q.get('chat'), type, title: q.get('title') || 'Grupa' }, from: { id: +(q.get('from') || q.get('chat')) }, text: q.get('text') };
+    if (q.get('thread')) Object.assign(msg, { message_thread_id: +q.get('thread'), is_topic_message: true });
+    updates.push({ update_id: updates.length + 1, message: msg });
     return { ok: true };
   }],
   [/^\/tg\/bot([^/]+)\/sendMessage$/, (m, q, req, body) => {
@@ -181,7 +184,11 @@ const routes = [
       failSends--;
       return { __status: 502, ok: false, description: 'Bad Gateway' };
     }
-    sent.push(JSON.parse(body));
+    const b = JSON.parse(body);
+    // Grupa, z której bota wyrzucono, i zwykła grupa zmieniona w supergrupę (nowy numer).
+    if (String(b.chat_id) === '-100999') return { __status: 403, ok: false, error_code: 403, description: 'Forbidden: bot was kicked from the supergroup chat' };
+    if (String(b.chat_id) === '-555') return { __status: 400, ok: false, error_code: 400, description: 'Bad Request: group chat was upgraded to a supergroup chat', parameters: { migrate_to_chat_id: -100555 } };
+    sent.push(b);
     return { ok: true, result: { message_id: sent.length } };
   }],
   [/^\/tg\/bot([^/]+)\/sendDocument$/, (m, q, req, body) => {
