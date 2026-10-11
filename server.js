@@ -23,6 +23,7 @@ const outcomes = require('./lib/outcomes');
 const auth = require('./lib/auth');
 const { Publisher } = require('./lib/publish');
 const tgbot = require('./lib/tgbot');
+const { CallLog } = require('./lib/calllog');
 
 const ROOT = __dirname;
 const CONFIG_PATH = process.env.RADAR_CONFIG || path.join(ROOT, 'config.json');
@@ -106,6 +107,9 @@ const state = merge({ alerted: {}, firstSeen: {}, cold: {}, watch: {}, alerts: [
 // Na karcie SD nie zapisujemy stanu po każdym skanie: od razu tylko po nowym alercie,
 // poza tym co 5 minut i przy zamykaniu aplikacji.
 let lastSave = 0, stateDirty = false;
+// Dziennik alertów (na stałe, poza state.json): DATA_DIR/calls/calls-RRRR-MM.jsonl
+const calllog = new CallLog(path.join(DATA_DIR, 'calls'));
+
 const saveState = (force) => {
   if (!force && !stateDirty && Date.now() - lastSave < 5 * 60e3) return;
   try {
@@ -162,11 +166,38 @@ function eligibleEarly(t) {
   return true;
 }
 
+const newId = () => Date.now().toString(36) + crypto.randomBytes(3).toString('hex');
 function pushAlert(entry) {
   stateDirty = true;
+  entry.id = entry.id || newId();
+  if (entry.type === 'token') Object.assign(entry, { peakAt: entry.at, lowAt: entry.at });
   state.alerts.unshift(entry);
+  // Lista robocza do pomiaru i panelu; pełna historia jest w dzienniku (calllog).
   const cutoff = Date.now() - 30 * 24 * 3.6e6;
-  state.alerts = state.alerts.filter((a) => a.at >= cutoff).slice(0, 1000);
+  state.alerts = state.alerts.filter((a) => a.at >= cutoff).slice(0, 3000);
+  return entry;
+}
+
+// Pełny obraz tokena w chwili alertu – do późniejszej analizy, co działało.
+function tokenSnapshot(t, kind, entry, threshold) {
+  const s = t.s, e = t.e;
+  return {
+    t: 'call', id: entry.id, at: entry.at, iso: new Date(entry.at).toISOString(), type: 'token', kind,
+    sent: entry.sent, error: entry.error || null,
+    symbol: t.symbol, name: t.name, chain: t.chain, address: t.address, pairAddress: t.pairAddress, dexId: t.dexId,
+    url: t.url, pumpUrl: t.pumpUrl || null, dataFrom: t.dataFrom,
+    score: entry.score, threshold, risk: s.risk,
+    price: t.priceUsd, liquidityUsd: t.liquidityUsd, marketCap: t.marketCap, fdv: t.fdv,
+    createdAt: t.createdAt, ageH: s.parts.ageH, seenMin: t.seenMin,
+    vol: t.vol, txns: t.txns, chg: t.chg, buyRatio: s.parts.buyRatio, tx1: s.parts.tx1,
+    uniq: t.uniq || null, lockedLiqPct: t.lockedLiqPct == null ? null : t.lockedLiqPct, boostsActive: t.boostsActive,
+    sources: t.sources, metas: (t.metas || []).map((m) => m.name), socials: t.socials,
+    isPump: t.isPump, bondingCurve: t.bondingCurve, pump: t.pump || null,
+    security: t.security || null, flags: s.flags,
+    momentum: { score: s.score, raw: s.momentum, penalty: s.penalty, parts: { vol: s.parts.vol, act: s.parts.act, buy: s.parts.buy, price: s.parts.price, attn: s.parts.attn } },
+    early: e ? { score: e.score, raw: e.raw, parts: e.parts, late: e.late, penalty: e.penalty, volX: e.volX, txX: e.txX, inScope: e.inScope, why: e.why } : null,
+    settings: { alerts: cfg.alerts, early: cfg.early },
+  };
 }
 
 const telegramReady = () => !!(cfg.telegram.token && cfg.telegram.chatId);
@@ -203,11 +234,16 @@ async function tokenAlerts(tokens, now, kind) {
     }
     state.alerted[mark] = now;
     const score = early ? t.e.score : t.s.score;
-    pushAlert({
+    const entry = pushAlert({
       at: now, type: 'token', kind, key: t.key, chain: t.chain, address: t.address, symbol: t.symbol, name: t.name,
       score, risk: t.s.risk, url: t.url, sent: res.sent, error: res.error,
       price0: t.priceUsd, liq0: t.liquidityUsd, mc0: t.marketCap || t.fdv || null, peak: t.priceUsd, low: t.priceUsd, checks: {},
     });
+    try {
+      calllog.append(tokenSnapshot(t, kind, entry, early ? cfg.early.minScore : cfg.alerts.minScore));
+    } catch (e) {
+      log('Nie mogę zapisać alertu w dzienniku: ' + e.message);
+    }
     log(`${early ? 'Wczesny sygnał' : 'Alert'}: ${t.symbol} (${t.chain}), wynik ${Math.round(score)}${res.sent ? ' – wysłano na Telegram' : ' – ' + res.error}`);
     n++;
   }
@@ -237,6 +273,14 @@ async function ensureTelegramChat() {
     }
   } catch (e) {
     tgInfo.error = /401|404/.test(e.message) ? 'Telegram nie rozpoznaje tego tokenu bota' : e.message;
+  }
+}
+
+function logSafe(o) {
+  try {
+    calllog.append(o);
+  } catch (e) {
+    log('Nie mogę zapisać w dzienniku: ' + e.message);
   }
 }
 
@@ -298,9 +342,28 @@ async function scanTokens() {
   prevScores.clear();
   for (const t of tokens) prevScores.set(t.key, t.s.score);
 
-  const before = JSON.stringify(state.alerts.map((a) => a.checks));
+  // Pomiar wyników: każdy nowy wynik (po 1/6/24 h) i zamknięcie po 24 h trafia też do dziennika.
+  const prev = new Map(state.alerts.map((a) => [a, { keys: Object.keys(a.checks || {}), done: !!a.done }]));
   outcomes.track(state.alerts, all, asked, now);
-  if (JSON.stringify(state.alerts.map((a) => a.checks)) !== before) stateDirty = true;
+  for (const a of state.alerts) {
+    const b = prev.get(a);
+    if (!b) continue;
+    for (const name of Object.keys(a.checks || {})) {
+      if (b.keys.includes(name)) continue;
+      stateDirty = true;
+      if (a.id) logSafe({ t: 'check', id: a.id, at: now, name, ...a.checks[name] });
+    }
+    if (a.done && !b.done) {
+      stateDirty = true;
+      if (a.id) {
+        logSafe({
+          t: 'done', id: a.id, at: now, peak: a.peak, peakAt: a.peakAt, low: a.low, lowAt: a.lowAt,
+          peakPct: Math.round((a.peak / a.price0 - 1) * 1000) / 10, lowPct: Math.round((a.low / a.price0 - 1) * 1000) / 10,
+          peakMin: a.peakAt ? Math.round((a.peakAt - a.at) / 60000) : null,
+        });
+      }
+    }
+  }
   const sentEarly = await tokenAlerts(tokens, now, 'early');
   const sent = await tokenAlerts(tokens, now, 'momentum');
 
@@ -380,7 +443,12 @@ async function scanNfts() {
           retry.add(c.slug);
           continue;
         }
-        pushAlert({ at: now, type: 'nft', key: 'nft:' + c.slug, symbol: c.name, name: c.name, chain: c.chain, score: c.s.score, risk: c.s.risk, url: c.url, sent: res.sent, error: res.error });
+        const entry = pushAlert({ at: now, type: 'nft', key: 'nft:' + c.slug, symbol: c.name, name: c.name, chain: c.chain, score: c.s.score, risk: c.s.risk, url: c.url, sent: res.sent, error: res.error });
+        logSafe({
+          t: 'call', id: entry.id, at: now, iso: new Date(now).toISOString(), type: 'nft', sent: res.sent, error: res.error || null,
+          symbol: c.name, name: c.name, slug: c.slug, chain: c.chain, url: c.url, score: c.s.score, threshold: cfg.alerts.nftMinScore, risk: c.s.risk, flags: c.s.flags,
+          price: null, floor: c.floor, currency: c.symbol, sales1d: c.sales1d, vol1d: c.vol1d, vol7d: c.vol7d, owners: c.owners, rank1h: c.rank1h || null, rank1d: c.rank1d || null,
+        });
         log(`Alert NFT: ${c.name}, wynik ${Math.round(c.s.score)}${res.sent ? ' – wysłano na Telegram' : ' – ' + res.error}`);
         n++;
       }
@@ -458,6 +526,7 @@ function stateJson(forSite) {
     topics: snapshot.topics,
     alerts: state.alerts.slice(0, 300),
     outcomes: outcomes.stats(state.alerts),
+    history: calllog.summary(),
     counts: snapshot.counts || null,
     sources: [...status.values()],
     scannedAt: snapshot.scannedAt,
@@ -564,6 +633,35 @@ function setCommand(arg) {
   return `✅ ${tgEsc(def[0])}: <b>${tgEsc(fmt(def[2](cfg)))}</b>`;
 }
 
+// /wyniki [24h|7d|30d|all] – skuteczność z dziennika alertów.
+function resultsText(arg) {
+  const map = { '24h': 'd1', '1d': 'd1', d1: 'd1', '7d': 'd7', '7': 'd7', d7: 'd7', '30d': 'd30', '30': 'd30', d30: 'd30', all: 'all', wszystko: 'all', calosc: 'all' };
+  const key = map[plain(arg || '').replace(/\s+/g, '')] || 'd7';
+  const H = calllog.summary();
+  const P = H[key];
+  const label = H.periods.find((x) => x.key === key).label;
+  const pc = (x) => (x == null ? '–' : (x > 0 ? '+' : '') + x + '%');
+  const line = (name, st) => {
+    if (!st.n) return `<b>${name}</b>: brak alertów`;
+    const h = (k, l) => (st[k].n ? `${l}: ${st[k].up}% na plusie, mediana ${pc(st[k].median)} (${st[k].n})` : `${l}: jeszcze brak`);
+    const pk = st.peak.n ? `szczyt w 24 h: mediana ${pc(st.peak.median)}, ${st.peak.p20}% doszło do +20%, ${st.peak.p50}% do +50%` : 'szczyt: jeszcze brak';
+    return [`<b>${name}</b> – ${st.n} alertów`, h('h1', 'po 1 h'), h('h6', 'po 6 h'), h('h24', 'po 24 h'), pk, st.dead ? `zniknęło lub wycofana płynność: ${st.dead}` : null].filter(Boolean).join('\n');
+  };
+  const out = [`📊 <b>Skuteczność – ${label}</b>`, '', line('Wczesne', P.kinds.early), '', line('Gorące', P.kinds.momentum)];
+  const bk = P.buckets.early.filter((b) => b.h24.n);
+  if (bk.length) out.push('', '<b>Wczesne wg wyniku (po 24 h)</b>', ...bk.map((b) => `${b.label}: ${b.h24.up}% na plusie, mediana ${pc(b.h24.median)} (${b.h24.n})`));
+  const closed = P.all.h24.n;
+  out.push('', closed < 30 ? `Zamkniętych po 24 h: ${closed} – poniżej ~30 wynik niewiele mówi.` : `Zamkniętych po 24 h: ${closed}.`, 'Inne okresy: /wyniki 24h | 7d | 30d | all');
+  return out.join('\n');
+}
+
+async function exportCsv() {
+  const csv = calllog.csv();
+  const name = `krypto-radar-alerty-${new Date().toISOString().slice(0, 10)}.csv`;
+  await tg.sendDocument(cfg, name, csv, `Historia alertów (${calllog.calls.size}). Otwórz w Excelu albo Arkuszach Google.`);
+  return null;
+}
+
 async function handleCommand(text) {
   const [raw, ...rest] = text.split(/\s+/);
   const cmd = plain(raw.slice(1).split('@')[0]);
@@ -583,6 +681,12 @@ async function handleCommand(text) {
       return '🔎 Skanuję. Wynik będzie na stronie za chwilę.';
     case 'ustawienia':
       return settingsText();
+    case 'wyniki':
+      return resultsText(arg);
+    case 'eksport':
+    case 'export':
+      if (!calllog.calls.size) return 'Dziennik jest jeszcze pusty – nie było żadnego alertu.';
+      return exportCsv();
     case 'ustaw':
       return setCommand(arg);
     case 'pauza':
@@ -917,5 +1021,9 @@ function shutdown() {
 process.on('SIGINT', shutdown);
 process.on('SIGTERM', shutdown); // systemd zatrzymuje usługę sygnałem SIGTERM
 
-if (process.argv.includes('--set-password')) setPassword();
+if (process.argv.includes('--export-csv')) {
+  // node server.js --export-csv > alerty.csv
+  process.stdout.write(calllog.csv());
+  process.exit(0);
+} else if (process.argv.includes('--set-password')) setPassword();
 else start();
