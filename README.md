@@ -180,6 +180,17 @@ Taśma jest kopiowana osobno do `~/krypto-radar-kopie/tape/` (każdy dzień raz)
 chroni przed jej awarią** – ustaw `backup.dir` w `~/krypto-radar-dane/config.json` na pendrive albo dysk sieciowy
 i zrestartuj usługę.
 
+## Solana osobno
+
+Tokenów z Solany jest najwięcej, więc domyślnie mają **osobną zakładkę „Solana”** (wczesne sygnały, gorące, pump.fun
+i alerty z własnymi statystykami), a w pozostałych zakładkach ich nie ma. Alerty z Solany **nie przychodzą na Telegram**:
+aplikacja dalej je wyłapuje, zapisuje w dzienniku i mierzy wyniki (1 h … 7 dni), żeby później sprawdzić, czy coś z nich jest.
+Na liście alertów mają oznaczenie „wyciszony”. Mają też osobny limit alertów na skan, więc nie zabierają miejsca innym sieciom.
+
+- `/ustaw solana_tg wł.` – powiadomienia Solany z powrotem na Telegram (`wył.` – znowu tylko w tle),
+- `/ustaw solana_osobno wył.` – Solana z powrotem razem z innymi sieciami na stronie,
+- `/wyniki` – skuteczność bez Solany, `/wyniki solana 7d` – tylko Solana; `/status` podaje liczbę alertów Solany osobno.
+
 ## Telegram tokena
 
 Dla każdego tokena aplikacja pokazuje stan jego Telegrama (na liście tokenów, w alercie na Telegramie i w szczegółach alertu):
