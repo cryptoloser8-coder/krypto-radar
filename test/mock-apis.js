@@ -56,7 +56,8 @@ const updates = [
   { update_id: 3, message: { chat: { id: -100777, type: 'group', title: 'Grupa' }, text: '123456' } },
   { update_id: 4, message: { chat: { id: 999, type: 'private', first_name: 'Obcy' }, text: 'halo' } },
 ];
-let failSends = 0; // ile kolejnych wiadomości Telegram ma „nie dojść”
+let failSends = 0;
+const docs = []; // pliki wysłane przez sendDocument (surowe ciało multipart) // ile kolejnych wiadomości Telegram ma „nie dojść”
 let osKeys = 0;
 
 const routes = [
@@ -142,7 +143,12 @@ const routes = [
     sent.push(JSON.parse(body));
     return { ok: true, result: { message_id: sent.length } };
   }],
+  [/^\/tg\/bot([^/]+)\/sendDocument$/, (m, q, req, body) => {
+    docs.push(body);
+    return { ok: true, result: { message_id: 1 } };
+  }],
   [/^\/__sent$/, () => sent],
+  [/^\/__docs$/, () => docs],
   [/^\/__failsends$/, (m, q) => ((failSends = +q.get('n') || 0), { ok: true })],
 ];
 
