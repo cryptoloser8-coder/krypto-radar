@@ -1,7 +1,7 @@
 'use strict';
 const $ = (id) => document.getElementById(id);
 // Musi się zgadzać z APP_VERSION w server.js – inaczej strona prosi o odświeżenie albo aktualizację Orange Pi.
-const APP_VERSION = 9;
+const APP_VERSION = 10;
 function el(tag, attrs, ...kids) {
   const n = document.createElement(tag);
   for (const k in attrs || {}) {
@@ -241,6 +241,25 @@ function avatar(src) {
   return im;
 }
 
+// Telegram tokena: publiczny (nazwa, członkowie), prywatny, brak – ten sam opis w tokenach i w alertach.
+function tgText(g, link) {
+  g = g || { s: link ? 'public' : 'none', unchecked: !!link };
+  const n0 = (x) => nf({ maximumFractionDigits: 0 }).format(x);
+  if (g.s === 'public') {
+    const what = g.type === 'channel' ? 'kanał publiczny' : g.type === 'group' ? 'grupa publiczna' : 'publiczny';
+    return what + (g.title ? ` „${g.title}”` : g.name ? ` @${g.name}` : '') + (g.n != null ? ` – ${n0(g.n)} członków` : g.unchecked ? ' (jeszcze niesprawdzony)' : '');
+  }
+  return {
+    private: 'prywatny – tylko link z zaproszeniem, liczby członków nie da się sprawdzić',
+    none: 'brak – token nie podaje Telegrama',
+    notfound: `@${g.name || ''} nie istnieje albo to konto osoby, nie kanał`,
+    bot: `tylko bot @${g.name || ''}, bez kanału`,
+    folder: 'folder kanałów (addlist)',
+    invalid: 'nieprawidłowy link',
+  }[g.s] || 'nieznany';
+}
+const TG_ICON = { public: '📢', private: '🔒', none: '➖', notfound: '❓', bot: '🤖', folder: '📁', invalid: '❓' };
+
 function tokenDetail(t) {
   const s = t.s;
   const srcs = (t.sources || []).map((x) => SRC[x]).filter(Boolean).concat((t.metas || []).map((m) => 'narracja „' + m.name + '”' + (m.hot ? ' (rośnie)' : '')));
@@ -265,6 +284,7 @@ function tokenDetail(t) {
       el('p', { class: 'mute', style: 'margin:6px 0 0;font-size:13px', text: sec })),
     el('div', null, el('h3', { text: 'Gdzie jest teraz widoczny' }),
       el('ul', null, srcs.length ? srcs.map((x) => el('li', { text: x })) : el('li', { class: 'info', text: 'Tylko w danych rynkowych.' })),
+      el('p', { style: 'margin:6px 0 0;font-size:13px', text: `${TG_ICON[(t.tg || {}).s] || ''} Telegram: ${tgText(t.tg, t.socials && t.socials.telegram)}` }),
       t.pump ? el('p', { class: 'mute', style: 'margin:6px 0 0;font-size:13px', text: `pump.fun: ${t.pump.replyCount} komentarzy` + (t.pump.live ? `, transmisja na żywo (${t.pump.participants} widzów)` : '') + (t.pump.complete ? ', po migracji z krzywej' : ', jeszcze na krzywej') }) : null),
     el('div', null, el('h3', { text: 'Linki' }),
       el('div', { class: 'links' }, link(t.url, t.dataFrom === 'geckoterminal' ? 'Wykres (GeckoTerminal)' : 'Wykres (DexScreener)'), link(t.pumpUrl, 'pump.fun'), link(t.socials && t.socials.twitter, 'X'), link(t.socials && t.socials.telegram, 'Telegram'), link(t.socials && t.socials.website, 'Strona')),
@@ -300,7 +320,7 @@ function renderTokens() {
     const tr = el('tr', { class: 'row r-' + s.risk, tabindex: '0', 'aria-expanded': String(ui.open.has(t.key)) },
       el('td', { text: i + 1 }),
       el('td', { class: 'l' }, el('div', { class: 'tok' }, avatar(t.image), el('div', null,
-        el('div', null, el('span', { class: 'sym', text: t.symbol }), el('span', { class: 'chain', text: t.chain }), t.isNew ? el('span', { class: 'badge-new', text: 'nowy na liście' }) : null),
+        el('div', null, el('span', { class: 'sym', text: t.symbol }), el('span', { class: 'chain', text: t.chain }), t.tg && t.tg.s !== 'none' ? el('span', { style: 'margin-left:6px;font-size:12px', title: 'Telegram: ' + tgText(t.tg), text: TG_ICON[t.tg.s] + (t.tg.n != null ? ' ' + (t.tg.n >= 1000 ? nf({ maximumFractionDigits: 1 }).format(t.tg.n / 1000) + ' tys.' : t.tg.n) : '') }) : null, t.isNew ? el('span', { class: 'badge-new', text: 'nowy na liście' }) : null),
         el('div', { class: 'nm', text: t.name })))),
       el('td', { class: 'l' }, early ? earlyCell(t.e) : scoreCell(s, t.delta)),
       el('td', { text: price(t.priceUsd) }),
@@ -690,15 +710,16 @@ function extraDetail(a) {
   blocks.push(tradeDiv);
 
   const tp = d.tgPre;
-  const tgAt = ea.tgMembers ?? (tp && tp.count);
-  if (d.tgLink || tgAt != null) {
-    const tgAfter = ['h1', 'h24', 'h72', 'd7'].map((t) => [t, en[t] && en[t].tgMembers]).filter(([, v]) => v != null);
-    blocks.push(el('div', null, el('h3', { text: 'Kanał Telegram tokena' }), el('ul', null,
-      li('Członków przy alercie', n0(tgAt)),
-      tp && tp.change != null ? li('Przed alertem', (tp.change >= 0 ? '+' : '') + n0(tp.change), ` w ${tp.minutes} min`) : null,
-      tgAfter.length ? li('Po alercie', tgAfter.map(([t, v]) => `${{ h1: '1 h', h24: '24 h', h72: '72 h', d7: '7 dni' }[t]}: ${n0(v)}`).join(', ')) : null),
-      d.tgLink ? link(d.tgLink, 'Otwórz kanał') : null));
-  }
+  const tgAt = ea.tgMembers ?? (tp && tp.count) ?? (d.tg && d.tg.n);
+  const tgAfter = ['h1', 'h24', 'h72', 'd7'].map((t) => [t, en[t] && en[t].tgMembers]).filter(([, v]) => v != null);
+  const g = d.tg || (ea.tgStatus ? { s: ea.tgStatus } : null);
+  const isPub = g ? g.s === 'public' : !!d.tgLink;
+  blocks.push(el('div', null, el('h3', { text: 'Telegram tokena' }), el('ul', null,
+    li('Stan', `${TG_ICON[(g || {}).s] || ''} ${g || d.tgLink ? tgText(g && Object.assign({}, g, { n: null }), d.tgLink) : 'brak danych (alert sprzed tej funkcji)'}`),
+    isPub && tgAt != null ? li('Członków przy alercie', n0(tgAt)) : null,
+    isPub && tp && tp.change != null ? li('Przed alertem', (tp.change >= 0 ? '+' : '') + n0(tp.change), ` w ${tp.minutes} min`) : null,
+    isPub && tgAfter.length ? li('Po alercie', tgAfter.map(([t, v]) => `${{ h1: '1 h', h24: '24 h', h72: '72 h', d7: '7 dni' }[t]}: ${n0(v)}${tgAt ? ` (${v - tgAt >= 0 ? '+' : ''}${n0(v - tgAt)})` : ''}`).join(', ')) : null),
+    d.tgLink ? link(d.tgLink, 'Otwórz Telegram') : null));
 
   const c2 = a.checks && a.checks.m2, c5 = a.checks && a.checks.m5;
   if (c2 || c5) {
