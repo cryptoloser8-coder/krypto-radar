@@ -180,6 +180,18 @@ Taśma jest kopiowana osobno do `~/krypto-radar-kopie/tape/` (każdy dzień raz)
 chroni przed jej awarią** – ustaw `backup.dir` w `~/krypto-radar-dane/config.json` na pendrive albo dysk sieciowy
 i zrestartuj usługę.
 
+## Telegram tokena
+
+Dla każdego tokena aplikacja pokazuje stan jego Telegrama (na liście tokenów, w alercie na Telegramie i w szczegółach alertu):
+
+- 📢 **publiczny** – nazwa kanału lub grupy i liczba członków (sprawdzane przez Twojego bota, także trend przed i po alercie),
+- 🔒 **prywatny** – link z zaproszeniem (`t.me/+…`, `joinchat`), liczby członków nie da się sprawdzić,
+- ➖ **brak** – token nie podaje Telegrama,
+- ❓ **nie istnieje** – nazwa z linku nie jest kanałem ani grupą (albo to konto osoby), 🤖 tylko bot, 📁 folder kanałów.
+
+Publiczne kanały sprawdzane są przed wysłaniem alertu i dla czołówki kandydatów (najwyżej 3 na skan), wynik pamiętany
+15 min; prywatność i brak rozpoznawane są z samego linku, bez zapytań.
+
 ## Jak powstaje wynik „gorące teraz”
 
 Momentum (0–100) to suma pięciu składników:
