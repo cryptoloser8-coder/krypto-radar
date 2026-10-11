@@ -23,34 +23,32 @@ sygnale. Nie przewiduje cen i nie jest poradą inwestycyjną.
 - **Strona i dane są publiczne** (darmowe GitHub Pages zawsze są). Nie trafiają tam żadne sekrety: token
   bota, numer rozmowy, kod parowania, klucz do repozytorium ani hasło zostają na Orange Pi.
 - **Orange Pi ma dostęp tylko do tego jednego repozytorium** – przez klucz „deploy”, nie przez Twoje konto GitHub.
+- **Usługa działa na Twoim koncie** (`bot`); dane i sekrety leżą w `~/krypto-radar-dane`, dostępne tylko dla Ciebie.
 
 ## Instalacja na Orange Pi
 
 Potrzebne: Node.js 18+ (na Orange Pi 5 Ultra z Ubuntu 22.04 jest już v20), `git` i `ssh`.
 
-1. Na github.com załóż **puste, publiczne** repozytorium, np. `krypto-radar` (bez README i licencji).
-2. Przenieś katalog aplikacji na Orange Pi i w nim uruchom:
+1. Wgraj kod do **publicznego** repozytorium na GitHubie (np. przez przeglądarkę: „uploading an existing file”).
+2. Na Orange Pi, ze swojego konta:
 
-       sudo bash deploy/install.sh
+       cd ~ && git clone https://github.com/LOGIN/krypto-radar.git
+       sudo bash ~/krypto-radar/deploy/install.sh
 
-3. Skrypt zapyta o:
-   - **token bota Telegram** – załóż *nowego* bota u @BotFather (`/newbot`); potem wyślij mu kod, który skrypt wypisze,
-   - **repozytorium** w postaci `login/nazwa` – skrypt wygeneruje klucz i pokaże go; dodaj go w GitHub →
-     repozytorium → Settings → Deploy keys → Add deploy key, z zaznaczonym **Allow write access**.
-4. Skrypt wyśle kod na gałąź `main`. Włącz stronę: Settings → Pages → Source: *Deploy from a branch*,
-   Branch: `main`, folder: `/docs` → Save. Po 1–2 minutach panel jest pod `https://LOGIN.github.io/NAZWA/`.
+3. Skrypt zapyta o **token bota** (nowy bot od @BotFather) i **repozytorium** (`login/nazwa`), wygeneruje klucz
+   do dodania w GitHub → repozytorium → Settings → **Deploy keys** (z zaznaczonym „Allow write access”) i poda
+   kod parowania, który wysyłasz botowi.
+4. Włącz stronę: Settings → Pages → Branch `main`, folder `/docs`. Panel: `https://LOGIN.github.io/NAZWA/`.
 
-Skrypt zakłada osobnego użytkownika systemowego `krypto-radar` (bez logowania i bez roota), kod trzyma
-w `/opt/krypto-radar`, a konfigurację, dane i klucz w `/var/lib/krypto-radar` (dostęp tylko dla tego
-użytkownika). Usługa startuje sama po włączeniu Orange Pi. Ponowne uruchomienie skryptu aktualizuje kod
-i zostawia ustawienia oraz historię alertów.
+Usługa działa na Twoim koncie i startuje sama po włączeniu Orange Pi. Kod zostaje w `~/krypto-radar`,
+a ustawienia, token bota, klucz GitHuba i historia alertów są w `~/krypto-radar-dane` – poza repozytorium,
+więc nie da się ich przypadkiem wypchnąć na GitHuba.
 
-    journalctl -u krypto-radar -f          # logi na żywo
-    sudo systemctl restart krypto-radar    # restart
-    sudo systemctl stop krypto-radar       # zatrzymanie
+    journalctl -u krypto-radar -f                                  # logi na żywo
+    sudo systemctl restart krypto-radar                            # restart
+    cd ~/krypto-radar && git pull && sudo systemctl restart krypto-radar   # aktualizacja
 
-**Aktualizacja strony:** zmiany w `docs/` wypychasz na `main` jak zwykły kod (`git push`) – GitHub Pages
-przebuduje stronę sam. Zmiany w reszcie kodu: `git pull` na Orange Pi i `sudo bash deploy/install.sh`.
+Ponowne uruchomienie instalatora niczego nie kasuje – uzupełnia tylko to, czego brakuje.
 
 ## Komendy w Telegramie
 
@@ -75,8 +73,8 @@ przyjmują `20k`, `1,5m`; przełączniki `on`/`off`.
 Na samym Orange Pi działa pełny panel z edycją ustawień i Telegrama: http://localhost:8787 (przeglądarka
 na pulpicie Orange Pi albo z laptopa przez tunel SSH: `ssh -L 8787:localhost:8787 bot@orangepi5ultra`).
 Domyślnie nie jest widoczny w sieci. Gdybyś chciał go otworzyć dla sieci domowej, ustaw `"host": "0.0.0.0"`
-w `/var/lib/krypto-radar/config.json` i hasło:
-`sudo -u krypto-radar env RADAR_CONFIG=/var/lib/krypto-radar/config.json node /opt/krypto-radar/server.js --set-password`
+w `~/krypto-radar-dane/config.json` i hasło:
+`RADAR_CONFIG=~/krypto-radar-dane/config.json node ~/krypto-radar/server.js --set-password`
 (bez hasła aplikacja w takim trybie nie wystartuje; jest też blokada zgadywania i lista dozwolonych adresów).
 
 ## Skąd dane
@@ -140,12 +138,12 @@ płynność i wolumen są powyżej minimów. O tym samym tokenie alert wraca naj
 ## Pliki
 
 - `docs/index.html`, `docs/app.js` – panel (ten sam na GitHub Pages i lokalnie),
-- `config.json` – ustawienia domyślne; działająca konfiguracja jest w `/var/lib/krypto-radar/config.json`,
-- `/var/lib/krypto-radar/data/state.json` – historia alertów i pamięć aplikacji; można usunąć, żeby zacząć od zera,
+- `config.json` – ustawienia domyślne; działająca konfiguracja jest w `~/krypto-radar-dane/config.json`,
+- `~/krypto-radar-dane/data/state.json` – historia alertów i pamięć aplikacji; można usunąć, żeby zacząć od zera,
 - `lib/score.js` – reguły punktacji i progi flag, jeśli zechcesz je dostroić,
 - `lib/outcomes.js` – pomiar skuteczności alertów,
 - `lib/publish.js` – wysyłanie danych na GitHuba, `lib/tgbot.js` – komendy z Telegrama, `lib/auth.js` – hasło panelu lokalnego,
-- `deploy/` – skrypt instalacyjny i usługa systemd,
+- `deploy/` – skrypt instalacyjny (tworzy też usługę systemd),
 - `test/run.js` – test całości bez internetu: `node test/run.js`.
 
 ## Zmiany względem wersji oryginalnej
