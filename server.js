@@ -170,7 +170,7 @@ const newId = () => Date.now().toString(36) + crypto.randomBytes(3).toString('he
 function pushAlert(entry) {
   stateDirty = true;
   entry.id = entry.id || newId();
-  if (entry.type === 'token') Object.assign(entry, { peakAt: entry.at, lowAt: entry.at });
+  if (entry.type === 'token') Object.assign(entry, { peakAt: entry.at, lowAt: entry.at, path: [[0, entry.price0]] });
   state.alerts.unshift(entry);
   // Lista robocza do pomiaru i panelu; pełna historia jest w dzienniku (calllog).
   const cutoff = Date.now() - 30 * 24 * 3.6e6;
@@ -359,7 +359,7 @@ async function scanTokens() {
         logSafe({
           t: 'done', id: a.id, at: now, peak: a.peak, peakAt: a.peakAt, low: a.low, lowAt: a.lowAt,
           peakPct: Math.round((a.peak / a.price0 - 1) * 1000) / 10, lowPct: Math.round((a.low / a.price0 - 1) * 1000) / 10,
-          peakMin: a.peakAt ? Math.round((a.peakAt - a.at) / 60000) : null,
+          peakMin: a.peakAt ? Math.round((a.peakAt - a.at) / 60000) : null, path: a.path || null,
         });
       }
     }
@@ -541,6 +541,20 @@ function stateJson(forSite) {
   };
 }
 
+// Pojedyncze alerty do panelu: ostatnie 500 z wynikami, przebiegiem ceny i obrazem z chwili alertu.
+function alertsJson() {
+  const keep = ['id', 'at', 'type', 'kind', 'symbol', 'chain', 'score', 'risk', 'url', 'sent', 'error', 'price0', 'liq0', 'mc0', 'checks', 'peak', 'peakAt', 'low', 'lowAt', 'done', 'path'];
+  // Bez znacznika czasu – plik zmienia się tylko przy nowym alercie albo wyniku, więc git nie wysyła go co 2 minuty.
+  return {
+    alerts: state.alerts.slice(0, 500).map((a) => {
+      const o = {};
+      for (const k of keep) if (a[k] != null) o[k] = a[k];
+      o.d = (a.id && calllog.details.get(a.id)) || null;
+      return o;
+    }),
+  };
+}
+
 // git@github.com:jan/radar.git albo https://github.com/jan/radar → https://jan.github.io/radar/
 function siteUrl() {
   const m = String(cfg.publish.repo || '').match(/github\.com[:/]([^/]+)\/([^/]+?)(?:\.git)?\/?$/i);
@@ -563,7 +577,7 @@ async function maybePublish() {
   lastPublish = Date.now();
   publishDue = false;
   try {
-    const r = await publisher.publish(stateJson(true));
+    const r = await publisher.publish(stateJson(true), { 'alerts.json': alertsJson() });
     report('GitHub – publikacja (kB)', true, Math.round(r.bytes / 1024));
   } catch (e) {
     report('GitHub – publikacja (kB)', false, 0, e.message);
@@ -867,6 +881,7 @@ const server = http.createServer(async (req, res) => {
     return send(res, 200, type, body, { 'content-security-policy': csp("'self'") });
   }
   if (req.method === 'GET' && url.pathname === '/api/state') return json(res, 200, stateJson(false));
+  if (req.method === 'GET' && url.pathname === '/api/alerts') return json(res, 200, alertsJson());
   if (req.method === 'POST') {
     if (!/^application\/json/.test(String(req.headers['content-type'] || ''))) return json(res, 415, { error: 'Oczekiwano JSON' });
     try {
