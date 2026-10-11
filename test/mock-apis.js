@@ -18,7 +18,7 @@ function pair(o) {
     priceChange: { h1: o.c1, h6: o.c6, h24: o.c24 },
     ...(o.liq == null ? {} : { liquidity: { usd: o.liq, base: 1, quote: 1 } }),
     fdv: o.fdv, marketCap: o.fdv, pairCreatedAt: NOW - o.ageH * H,
-    ...(o.social ? { info: { imageUrl: 'https://example.com/i.png', websites: [{ url: 'https://example.com', label: 'Website' }], socials: [{ url: 'https://x.com/' + o.sym, type: 'twitter' }, { url: 'https://t.me/' + o.sym.toLowerCase() + '_portal', type: 'telegram' }] } } : {}),
+    ...(o.social ? { info: { imageUrl: 'https://example.com/i.png', websites: [{ url: 'https://example.com', label: 'Website' }], socials: [{ url: 'https://x.com/' + o.sym, type: 'twitter' }, { url: o.tg || 'https://t.me/' + o.sym.toLowerCase() + '_portal', type: 'telegram' }] } } : {}),
     ...(o.boost ? { boosts: { active: o.boost } } : {}),
   };
 }
@@ -37,14 +37,14 @@ const PAIRS = {
     // druga, słabsza para tego samego tokena – nie powinna wygrać
     pair({ chain: 'solana', dex: 'meteora', sym: 'GOOD', addr: GOOD, pair: 'pairGOOD2', b1: 5, s1: 5, v1: 900, v6: 2000, v24: 4000, c1: 1, c6: 1, c24: 1, liq: 9000, fdv: 2000000, ageH: 9 }),
     pair({ chain: 'solana', dex: 'pumpfun', sym: 'CURVE', addr: CURVE, b1: 300, s1: 200, v5: 3000, v1: 40000, v6: 40000, v24: 40000, c1: 60, c6: 60, c24: 60, liq: null, fdv: 45000, ageH: 0.5 }),
-    pair({ chain: 'solana', sym: 'DUMP', addr: DUMP, b1: 100, s1: 400, v1: 90000, v6: 200000, v24: 400000, c1: -62, c6: -70, c24: -40, liq: 60000, fdv: 500000, ageH: 30, social: true }),
+    pair({ chain: 'solana', sym: 'DUMP', addr: DUMP, b1: 100, s1: 400, v1: 90000, v6: 200000, v24: 400000, c1: -62, c6: -70, c24: -40, liq: 60000, fdv: 500000, ageH: 30, social: true, tg: 'https://t.me/+AbCdEf123456' }),
     pair({ chain: 'solana', sym: 'USDC', addr: USDC, b1: 900, s1: 900, v1: 9e6, v6: 5e7, v24: 2e8, c1: 0, c6: 0, c24: 0, liq: 5e7, fdv: 5e10, ageH: 9000, social: true }),
   ],
   ethereum: [pair({ chain: 'ethereum', dex: 'uniswap', sym: 'RUG', addr: RUG, b1: 80, s1: 40, v1: 30000, v6: 60000, v24: 90000, c1: 40, c6: 90, c24: 300, liq: 3000, fdv: 900000, ageH: 5 })],
   base: [
     // Wczesny sygnał: wolumen 3,3× średniej, cena prawie stoi, mała wycena, sensowna płynność.
     pair({ chain: 'base', dex: 'aerodrome', sym: 'EARLY', addr: EARLY, pair: '0xPoolEarly', b1: 90, s1: 50, v5: 1500, v1: 12000, v6: 18000, v24: 18000, c1: 4, c6: 10, c24: 12, liq: 60000, fdv: 400000, ageH: 5, social: true }),
-    pair({ chain: 'base', dex: 'aerodrome', sym: 'HONEY', addr: HONEY, b1: 700, s1: 100, v5: 30000, v1: 200000, v6: 350000, v24: 600000, c1: 35, c6: 70, c24: 150, liq: 200000, fdv: 3000000, ageH: 20, social: true }),
+    pair({ chain: 'base', dex: 'aerodrome', sym: 'HONEY', addr: HONEY, b1: 700, s1: 100, v5: 30000, v1: 200000, v6: 350000, v24: 600000, c1: 35, c6: 70, c24: 150, liq: 200000, fdv: 3000000, ageH: 20, social: true, tg: 'https://t.me/honey_nope' }),
   ],
 };
 
@@ -132,6 +132,11 @@ const routes = [
     ...[100, 300].map((v, i) => ({ attributes: { kind: 'sell', volume_in_usd: String(v), tx_from_address: 's' + i, block_timestamp: new Date(Date.now() - (10 + i) * 60e3).toISOString() } })),
   ] })],
   // Członkowie publicznego kanału Telegram.
+  [/^\/tg\/bot([^/]+)\/getChat$/, (m, q) => {
+    const id = q.get('chat_id');
+    if (!/_portal$/.test(id)) return { __status: 400, ok: false, error_code: 400, description: 'Bad Request: chat not found' };
+    return { ok: true, result: { id: -1001, type: 'channel', title: id.slice(1).replace('_portal', '').toUpperCase() + ' Portal', username: id.slice(1) } };
+  }],
   [/^\/tg\/bot([^/]+)\/getChatMemberCount$/, (m, q) => ({ ok: true, result: 500 + (++tgCalls) * 10 })],
   [/^\/cg\/search\/trending$/, () => ({
     coins: [{ item: { id: 'roo', coin_id: 1, name: 'Roo', symbol: 'ROO', market_cap_rank: 900, thumb: 'https://example.com/r.png', data: { price_change_percentage_24h: { usd: -17.8 }, total_volume: '$1' } } }],
