@@ -277,6 +277,14 @@ async function integration() {
     assert.deepStrictEqual(cfgNow.alerts.chains, ['solana', 'base']);
     assert.strictEqual(cfgNow.alerts.minScore, 75);
 
+    // Szczegóły pojedynczych alertów: lokalnie /api/alerts i na GitHubie alerts.json – z obrazem z chwili alertu.
+    const al = await fetch(`http://127.0.0.1:${APP}/api/alerts`).then((r) => r.json());
+    const ae = al.alerts.find((a) => a.symbol === 'EARLY' && a.id);
+    assert.ok(ae && ae.d && ae.d.threshold === 45 && ae.d.early.parts.demand > 0 && ae.d.liq === 60000 && ae.d.uniq.buyers === 70 && Array.isArray(ae.path), JSON.stringify(ae).slice(0, 300));
+    const pubAl = JSON.parse(gitR('show', 'data:alerts.json'));
+    assert.ok(pubAl.alerts.some((a) => a.symbol === 'GOOD' && a.d && a.d.momentum.parts.vol > 0));
+    assert.ok(!JSON.stringify(pubAl).includes('AAAAAAAAAAAA'));
+
     // Dziennik: pełny zapis alertów, bez sekretów; statystyki w danych strony; /wyniki i /eksport.
     const logDir = path.join(dir, 'data', 'calls');
     const logLines = fs.readdirSync(logDir).flatMap((f) => fs.readFileSync(path.join(logDir, f), 'utf8').trim().split('\n')).map((l) => JSON.parse(l));
@@ -314,6 +322,16 @@ async function integration() {
 }
 
 // ---- Dziennik alertów ------------------------------------------------------
+function pathUnit() {
+  const at = Date.now() - 3 * 3.6e6;
+  const a = { type: 'token', key: 'k', at, price0: 1, peak: 1, low: 1, checks: {} };
+  for (let m = 1; m <= 180; m++) outcomes.track([a], new Map([['k', { priceUsd: m < 100 ? 1 + m / 100 : 1.5, liquidityUsd: 1 }]]), new Set(), at + m * 60e3);
+  assert.ok(a.path.length >= 12 && a.path.length <= 14 && a.path[0][0] === 0, 'punkt co ~15 min: ' + a.path.length);
+  assert.strictEqual(a.peak, 1.99);
+  assert.strictEqual(Math.round((a.peakAt - at) / 60000), 99);
+  assert.ok(a.checks.h1 && a.checks.h1.p === 1.6 && a.checks.h1.chg === 60);
+}
+
 function callLogUnit() {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'radar-log-'));
   const L = new CallLog(dir);
@@ -481,6 +499,7 @@ async function access() {
 
 (async () => {
   unit();
+  pathUnit();
   callLogUnit();
   await integration();
   await access();
