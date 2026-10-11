@@ -15,7 +15,7 @@ if (typeof fetch !== 'function') {
   process.exit(1);
 }
 
-const { collectTokens, collectNfts, annotateUniq } = require('./lib/sources');
+const { collectTokens, collectNfts, annotateUniq, candleExtremes } = require('./lib/sources');
 const { scoreToken, scoreEarly, scoreNft } = require('./lib/score');
 const security = require('./lib/security');
 const tg = require('./lib/telegram');
@@ -110,6 +110,31 @@ let lastSave = 0, stateDirty = false;
 // Dziennik alertów (na stałe, poza state.json): DATA_DIR/calls/calls-RRRR-MM.jsonl
 const calllog = new CallLog(path.join(DATA_DIR, 'calls'));
 
+// Alerty sprzed dziennika (bez id) dopisujemy do niego w skrócie, żeby były w historii i statystykach.
+function backfillAlerts() {
+  let n = 0;
+  for (const a of state.alerts.slice().reverse()) {
+    if (a.id) continue;
+    a.id = a.at.toString(36) + crypto.randomBytes(3).toString('hex');
+    try {
+      calllog.append({
+        t: 'call', id: a.id, at: a.at, iso: new Date(a.at).toISOString(), type: a.type, kind: a.kind || (a.type === 'token' ? 'momentum' : undefined), backfill: true,
+        sent: a.sent, error: a.error || null, symbol: a.symbol, name: a.name, chain: a.chain, address: a.address, url: a.url,
+        score: a.score, risk: a.risk, price: a.price0 || null, liquidityUsd: a.liq0, marketCap: a.mc0,
+      });
+      for (const [name, c] of Object.entries(a.checks || {})) calllog.append(Object.assign({}, c, { t: 'check', id: a.id, at: c.t || a.at, name, ct: c.t }));
+      n++;
+    } catch (e) {
+      log('Nie mogę dopisać starszego alertu do dziennika: ' + e.message);
+    }
+  }
+  if (n) {
+    stateDirty = true;
+    log(`Dopisano do dziennika ${n} starszych alertów`);
+  }
+  return n;
+}
+
 const saveState = (force) => {
   if (!force && !stateDirty && Date.now() - lastSave < 5 * 60e3) return;
   try {
@@ -172,10 +197,62 @@ function pushAlert(entry) {
   entry.id = entry.id || newId();
   if (entry.type === 'token') Object.assign(entry, { peakAt: entry.at, lowAt: entry.at, path: [[0, entry.price0]] });
   state.alerts.unshift(entry);
-  // Lista robocza do pomiaru i panelu; pełna historia jest w dzienniku (calllog).
-  const cutoff = Date.now() - 30 * 24 * 3.6e6;
-  state.alerts = state.alerts.filter((a) => a.at >= cutoff).slice(0, 3000);
+  pruneAlerts();
   return entry;
+}
+
+// Lista robocza: alerty w trakcie pomiaru (do 7 dni) i świeżo zamknięte. Pełna historia jest w dzienniku.
+function pruneAlerts() {
+  const now = Date.now();
+  state.alerts = state.alerts.filter((a) => !a.done || now - a.at < 9 * 864e5).slice(0, 20000);
+  // Przebieg ceny po pierwszej dobie trafia do pliku szczegółów – w stanie aplikacji nie jest już potrzebny.
+  for (const a of state.alerts) if (a.path && now - a.at > 26 * 3.6e6) delete a.path;
+}
+
+// Szczegóły jednego alertu (DATA_DIR/details/<id>.json): obraz z chwili alertu, pomiary, przebieg ceny.
+// Zapisywane przy alercie i przy każdym pomiarze; strona pobiera je dopiero po rozwinięciu alertu.
+const DETAILS_DIR = path.join(DATA_DIR, 'details');
+const ROW_KEYS = ['id', 'at', 'type', 'kind', 'symbol', 'chain', 'score', 'risk', 'url', 'sent', 'error', 'price0', 'liq0', 'mc0', 'checks', 'peak', 'peakAt', 'low', 'lowAt', 'done', 'path'];
+const rowOf = (a) => {
+  const o = {};
+  for (const k of ROW_KEYS) if (a[k] != null) o[k] = a[k];
+  return o;
+};
+function writeDetail(a) {
+  if (!a.id) return;
+  try {
+    fs.mkdirSync(DETAILS_DIR, { recursive: true, mode: 0o700 });
+    const file = path.join(DETAILS_DIR, a.id + '.json');
+    let prev = {};
+    try {
+      prev = JSON.parse(fs.readFileSync(file, 'utf8'));
+    } catch (e) {}
+    const o = Object.assign({}, prev, rowOf(a));
+    o.d = calllog.details.get(a.id) || prev.d || null;
+    if (!a.path && prev.path) o.path = prev.path;
+    fs.writeFileSync(file + '.tmp', JSON.stringify(o), { mode: 0o600 });
+    fs.renameSync(file + '.tmp', file);
+  } catch (e) {
+    log('Nie mogę zapisać szczegółów alertu: ' + e.message);
+  }
+}
+function readDetail(id) {
+  if (!/^[a-z0-9]{6,40}$/.test(String(id))) return null;
+  try {
+    return JSON.parse(fs.readFileSync(path.join(DETAILS_DIR, id + '.json'), 'utf8'));
+  } catch (e) {
+    return null;
+  }
+}
+// Pliki szczegółów starsze niż 35 dni usuwamy (pełne dane zostają w dzienniku).
+function pruneDetails() {
+  try {
+    const cut = Date.now() - 35 * 864e5;
+    for (const f of fs.readdirSync(DETAILS_DIR)) {
+      const full = path.join(DETAILS_DIR, f);
+      if (fs.statSync(full).mtimeMs < cut) fs.unlinkSync(full);
+    }
+  } catch (e) {}
 }
 
 // Pełny obraz tokena w chwili alertu – do późniejszej analizy, co działało.
@@ -238,12 +315,14 @@ async function tokenAlerts(tokens, now, kind) {
       at: now, type: 'token', kind, key: t.key, chain: t.chain, address: t.address, symbol: t.symbol, name: t.name,
       score, risk: t.s.risk, url: t.url, sent: res.sent, error: res.error,
       price0: t.priceUsd, liq0: t.liquidityUsd, mc0: t.marketCap || t.fdv || null, peak: t.priceUsd, low: t.priceUsd, checks: {},
+      pair: t.pairAddress || null,
     });
     try {
       calllog.append(tokenSnapshot(t, kind, entry, early ? cfg.early.minScore : cfg.alerts.minScore));
     } catch (e) {
       log('Nie mogę zapisać alertu w dzienniku: ' + e.message);
     }
+    writeDetail(entry);
     log(`${early ? 'Wczesny sygnał' : 'Alert'}: ${t.symbol} (${t.chain}), wynik ${Math.round(score)}${res.sent ? ' – wysłano na Telegram' : ' – ' + res.error}`);
     n++;
   }
@@ -289,7 +368,8 @@ async function scanTokens() {
   // Poza listami źródeł odświeżamy też tokeny po alercie (do pomiaru skuteczności) i obserwowane.
   const extra = [];
   for (const a of state.alerts) {
-    if (!outcomes.tracked(a) || a.done) continue;
+    // Cenę dociągamy tylko w pierwszej dobie i w oknach pomiarów (72 h, 7 dni) – nie przez cały tydzień.
+    if (!outcomes.wantsPrice(a, Date.now())) continue;
     const i = a.key.indexOf(':');
     extra.push({ chain: a.chain || a.key.slice(0, i), address: a.address || a.key.slice(i + 1) });
   }
@@ -342,26 +422,46 @@ async function scanTokens() {
   prevScores.clear();
   for (const t of tokens) prevScores.set(t.key, t.s.score);
 
-  // Pomiar wyników: każdy nowy wynik (po 1/6/24 h) i zamknięcie po 24 h trafia też do dziennika.
+  // Szczyt i dołek dla pomiarów 72 h i 7 dni – ze świec godzinowych GeckoTerminal (najwyżej 3 zapytania na skan).
+  let candles = 0;
+  outer: for (const a of state.alerts) {
+    for (const w of outcomes.wantsExtremes(a, now)) {
+      if (candles >= 3) break outer;
+      candles++;
+      try {
+        const e = await candleExtremes(cfg, a, w.from, w.to);
+        a.ext = Object.assign(a.ext || {}, { [w.name]: e || { hi: 0, lo: 0 } });
+      } catch (e) {
+        if (e.status === 429) break outer;
+        a.ext = Object.assign(a.ext || {}, { [w.name]: { hi: 0, lo: 0 } });
+      }
+    }
+  }
+
+  // Pomiar wyników: każdy nowy wynik (1 h, 6 h, 24 h, 72 h, 7 dni) trafia do dziennika i do pliku szczegółów.
   const prev = new Map(state.alerts.map((a) => [a, { keys: Object.keys(a.checks || {}), done: !!a.done }]));
   outcomes.track(state.alerts, all, asked, now);
   for (const a of state.alerts) {
     const b = prev.get(a);
     if (!b) continue;
+    let changed = false;
     for (const name of Object.keys(a.checks || {})) {
       if (b.keys.includes(name)) continue;
-      stateDirty = true;
-      if (a.id) logSafe({ t: 'check', id: a.id, at: now, name, ...a.checks[name] });
+      changed = true;
+      if (a.id) {
+        const extra = name === 'h24' ? { peakAt: a.peakAt, lowAt: a.lowAt, peakMin: a.peakAt ? Math.round((a.peakAt - a.at) / 60000) : null, path: a.path || null } : {};
+        // Pole „t” pomiaru to jego godzina – w dzienniku zapisujemy ją jako „ct”, bo „t” oznacza typ linii.
+        const c = a.checks[name];
+        logSafe(Object.assign({}, c, extra, { t: 'check', id: a.id, at: now, name, ct: c.t }));
+      }
     }
     if (a.done && !b.done) {
+      changed = true;
+      if (a.id) logSafe({ t: 'done', id: a.id, at: now });
+    }
+    if (changed) {
       stateDirty = true;
-      if (a.id) {
-        logSafe({
-          t: 'done', id: a.id, at: now, peak: a.peak, peakAt: a.peakAt, low: a.low, lowAt: a.lowAt,
-          peakPct: Math.round((a.peak / a.price0 - 1) * 1000) / 10, lowPct: Math.round((a.low / a.price0 - 1) * 1000) / 10,
-          peakMin: a.peakAt ? Math.round((a.peakAt - a.at) / 60000) : null, path: a.path || null,
-        });
-      }
+      writeDetail(a);
     }
   }
   const sentEarly = await tokenAlerts(tokens, now, 'early');
@@ -382,6 +482,12 @@ async function scanTokens() {
   if (wk.length > W.max) {
     wk.sort((a, b) => state.watch[b].f - state.watch[a].f);
     for (const k of wk.slice(W.max)) delete state.watch[k];
+  }
+
+  pruneAlerts();
+  if (!cache.detailsPrunedAt || now - cache.detailsPrunedAt > 864e5) {
+    cache.detailsPrunedAt = now;
+    pruneDetails();
   }
 
   // Sprzątanie pamięci: znaczniki starsze niż 3 dni.
@@ -449,6 +555,7 @@ async function scanNfts() {
           symbol: c.name, name: c.name, slug: c.slug, chain: c.chain, url: c.url, score: c.s.score, threshold: cfg.alerts.nftMinScore, risk: c.s.risk, flags: c.s.flags,
           price: null, floor: c.floor, currency: c.symbol, sales1d: c.sales1d, vol1d: c.vol1d, vol7d: c.vol7d, owners: c.owners, rank1h: c.rank1h || null, rank1d: c.rank1d || null,
         });
+        writeDetail(entry);
         log(`Alert NFT: ${c.name}, wynik ${Math.round(c.s.score)}${res.sent ? ' – wysłano na Telegram' : ' – ' + res.error}`);
         n++;
       }
@@ -524,9 +631,7 @@ function stateJson(forSite) {
     tokens: snapshot.tokens,
     nfts: snapshot.nfts,
     topics: snapshot.topics,
-    alerts: state.alerts.slice(0, 300),
-    outcomes: outcomes.stats(state.alerts),
-    history: calllog.summary(),
+    alertsCount: { day: state.alerts.filter((a) => Date.now() - a.at < 864e5).length, total: calllog.calls.size },
     counts: snapshot.counts || null,
     sources: [...status.values()],
     scannedAt: snapshot.scannedAt,
@@ -541,18 +646,15 @@ function stateJson(forSite) {
   };
 }
 
-// Pojedyncze alerty do panelu: ostatnie 500 z wynikami, przebiegiem ceny i obrazem z chwili alertu.
-function alertsJson() {
-  const keep = ['id', 'at', 'type', 'kind', 'symbol', 'chain', 'score', 'risk', 'url', 'sent', 'error', 'price0', 'liq0', 'mc0', 'checks', 'peak', 'peakAt', 'low', 'lowAt', 'done', 'path'];
-  // Bez znacznika czasu – plik zmienia się tylko przy nowym alercie albo wyniku, więc git nie wysyła go co 2 minuty.
-  return {
-    alerts: state.alerts.slice(0, 500).map((a) => {
-      const o = {};
-      for (const k of keep) if (a[k] != null) o[k] = a[k];
-      o.d = (a.id && calllog.details.get(a.id)) || null;
-      return o;
-    }),
-  };
+// Alerty z ostatnich 24 h – z bieżącym szczytem, dołkiem i przebiegiem ceny (zmienia się co kilka minut).
+function alertsLive() {
+  const now = Date.now();
+  return { alerts: state.alerts.filter((a) => now - a.at < 864e5).map(rowOf) };
+}
+// Indeks: wszystkie alerty z 30 dni w skrócie – do podglądu skuteczności, filtrów i historii.
+// Zmienia się tylko przy nowym alercie albo pomiarze, więc git nie wysyła go co 2 minuty.
+function alertsIndex() {
+  return { rows: calllog.index(Date.now(), 30) };
 }
 
 // git@github.com:jan/radar.git albo https://github.com/jan/radar → https://jan.github.io/radar/
@@ -577,7 +679,7 @@ async function maybePublish() {
   lastPublish = Date.now();
   publishDue = false;
   try {
-    const r = await publisher.publish(stateJson(true), { 'alerts.json': alertsJson() });
+    const r = await publisher.publish(stateJson(true), { 'alerts-live.json': alertsLive(), 'alerts-index.json': alertsIndex() }, { details: DETAILS_DIR });
     report('GitHub – publikacja (kB)', true, Math.round(r.bytes / 1024));
   } catch (e) {
     report('GitHub – publikacja (kB)', false, 0, e.message);
@@ -659,7 +761,7 @@ function resultsText(arg) {
     if (!st.n) return `<b>${name}</b>: brak alertów`;
     const h = (k, l) => (st[k].n ? `${l}: ${st[k].up}% na plusie, mediana ${pc(st[k].median)} (${st[k].n})` : `${l}: jeszcze brak`);
     const pk = st.peak.n ? `szczyt w 24 h: mediana ${pc(st.peak.median)}, ${st.peak.p20}% doszło do +20%, ${st.peak.p50}% do +50%` : 'szczyt: jeszcze brak';
-    return [`<b>${name}</b> – ${st.n} alertów`, h('h1', 'po 1 h'), h('h6', 'po 6 h'), h('h24', 'po 24 h'), pk, st.dead ? `zniknęło lub wycofana płynność: ${st.dead}` : null].filter(Boolean).join('\n');
+    return [`<b>${name}</b> – ${st.n} alertów`, h('h1', 'po 1 h'), h('h24', 'po 24 h'), h('h72', 'po 72 h'), h('d7', 'po 7 dniach'), pk, st.dead ? `zniknęło lub wycofana płynność: ${st.dead}` : null].filter(Boolean).join('\n');
   };
   const out = [`📊 <b>Skuteczność – ${label}</b>`, '', line('Wczesne', P.kinds.early), '', line('Gorące', P.kinds.momentum)];
   const bk = P.buckets.early.filter((b) => b.h24.n);
@@ -881,7 +983,11 @@ const server = http.createServer(async (req, res) => {
     return send(res, 200, type, body, { 'content-security-policy': csp("'self'") });
   }
   if (req.method === 'GET' && url.pathname === '/api/state') return json(res, 200, stateJson(false));
-  if (req.method === 'GET' && url.pathname === '/api/alerts') return json(res, 200, alertsJson());
+  if (req.method === 'GET' && url.pathname === '/api/alerts') return json(res, 200, { live: alertsLive(), index: alertsIndex() });
+  if (req.method === 'GET' && url.pathname === '/api/alert') {
+    const d = readDetail(url.searchParams.get('id'));
+    return d ? json(res, 200, d) : json(res, 404, { error: 'Brak szczegółów tego alertu' });
+  }
   if (req.method === 'POST') {
     if (!/^application\/json/.test(String(req.headers['content-type'] || ''))) return json(res, 415, { error: 'Oczekiwano JSON' });
     try {
@@ -952,6 +1058,7 @@ function start() {
     }
     await waitForClock();
     STARTED = Date.now();
+    if (backfillAlerts()) for (const a of state.alerts) writeDetail(a);
     cycle();
     tgbot.startPolling({
       getCfg: () => cfg,
