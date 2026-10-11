@@ -1,5 +1,7 @@
 'use strict';
 const $ = (id) => document.getElementById(id);
+// Musi się zgadzać z APP_VERSION w server.js – inaczej strona prosi o odświeżenie albo aktualizację Orange Pi.
+const APP_VERSION = 9;
 function el(tag, attrs, ...kids) {
   const n = document.createElement(tag);
   for (const k in attrs || {}) {
@@ -136,7 +138,21 @@ function render() {
   renderTokens();
 }
 
+function versionNote() {
+  let n = $('verNote');
+  if (!n) {
+    n = el('div', { id: 'verNote', class: 'panel', style: 'max-width:none;border:1px solid var(--warn)', role: 'status' });
+    $('view').before(n);
+  }
+  const v = S && S.appVersion;
+  n.hidden = !v || v === APP_VERSION;
+  n.textContent = !v || v === APP_VERSION ? '' : v > APP_VERSION
+    ? 'Na Orange Pi działa nowsza wersja niż ta strona. Odśwież stronę z pominięciem pamięci (Ctrl+Shift+R); jeśli to nie pomoże, poczekaj 1–2 minuty, aż GitHub Pages ją przebuduje.'
+    : 'Strona jest nowsza niż aplikacja na Orange Pi. Zaktualizuj Orange Pi: cd ~/krypto-radar && git pull && sudo systemctl restart krypto-radar';
+}
+
 function renderTop() {
+  versionNote();
   if (REMOTE && S.publishedAt) {
     // Dane z GitHuba: ważne jest, jak dawno Orange Pi je wysłał.
     const age = Math.round((Date.now() - S.publishedAt) / 60000);
@@ -189,6 +205,7 @@ function filteredTokens() {
     vol1: (a, b) => b.vol.h1 - a.vol.h1,
     chg1: (a, b) => (b.chg.h1 || -1e9) - (a.chg.h1 || -1e9),
     age: (a, b) => (b.createdAt || 0) - (a.createdAt || 0),
+    chain: (a, b) => String(a.chain).localeCompare(String(b.chain)) || (isEarly() ? b.e.score - a.e.score : b.s.score - a.s.score),
   }[ui.sort];
   return list.sort(by);
 }
@@ -267,7 +284,7 @@ function renderTokens() {
     el('input', { type: 'search', id: 'q', placeholder: 'Szukaj: symbol, nazwa, adres', value: ui.q, 'aria-label': 'Szukaj tokena', oninput: (e) => { ui.q = e.target.value; render(); } }),
     sel('fChain', [['', 'Wszystkie sieci'], ...chains.map((c) => [c, c])], ui.chain, (v) => (ui.chain = v)),
     sel('fLiq', [[0, 'Dowolna płynność'], [10000, 'Płynność od $10 tys.'], [50000, 'od $50 tys.'], [250000, 'od $250 tys.'], [1000000, 'od $1 mln']], ui.minLiq, (v) => (ui.minLiq = +v)),
-    sel('fSort', [['score', 'Sortuj: wynik'], ...(early ? [] : [['momentum', 'momentum (bez kar)']]), ['vol1', 'wolumen 1 h'], ['chg1', 'zmiana 1 h'], ['age', 'najmłodsze']], ui.sort, (v) => (ui.sort = v)),
+    sel('fSort', [['score', 'Sortuj: wynik'], ...(early ? [] : [['momentum', 'momentum (bez kar)']]), ['vol1', 'wolumen 1 h'], ['chg1', 'zmiana 1 h'], ['age', 'najmłodsze'], ['chain', 'sieć, potem wynik']], ui.sort, (v) => (ui.sort = v)),
     el('label', null, el('input', { type: 'checkbox', checked: ui.hideCrit, onchange: (e) => { ui.hideCrit = e.target.checked; render(); } }), 'Ukryj krytyczne ryzyko'),
     ui.meta ? el('button', { class: 'linkbtn', text: 'Wyczyść filtr narracji', onclick: () => { ui.meta = ''; render(); } }) : null);
   const legend = el('div', { class: 'legend' }, el('span', { text: 'Pasek wyniku:' }),
@@ -315,7 +332,12 @@ function renderNfts() {
   const view = $('view');
   const nfig = (x, sym) => (x == null ? '–' : nf({ maximumSignificantDigits: 3 }).format(x) + (sym ? ' ' + sym : ''));
   const head = el('tr', null, ['#', 'Kolekcja', 'Wynik', 'Floor', 'Zmiana floor', 'Sprzedaże 24 h', 'Wolumen 24 h', 'Wolumen 7 dni', 'Doba vs średnia 7 dni', 'Posiadacze', 'Pozycja 1 h / 24 h', 'Ryzyko'].map((h, i) => el('th', { class: i === 1 || i === 2 || i === 11 ? 'l' : '', text: h })));
-  const rows = S.nfts.map((c, i) => {
+  const nchains = [...new Set(S.nfts.map((c) => c.chain).filter(Boolean))].sort();
+  if (ui.nftChain && !nchains.includes(ui.nftChain)) ui.nftChain = '';
+  const nfts = S.nfts.filter((c) => !ui.nftChain || c.chain === ui.nftChain);
+  const nftFilter = nchains.length > 1 ? el('div', { class: 'filters' }, el('select', { 'aria-label': 'Sieć', onchange: (e) => { ui.nftChain = e.target.value; render(); } },
+    [['', 'Wszystkie sieci'], ...nchains.map((c) => [c, c])].map(([v, t]) => el('option', { value: v, selected: (ui.nftChain || '') === v, text: t })))) : null;
+  const rows = nfts.map((c, i) => {
     const s = c.s;
     const bar = el('div', { class: 'bar', title: `Przyspieszenie: ${s.parts.accel}\nSprzedaże: ${s.parts.sales}\nPozycja w trendach: ${s.parts.rank}\nFloor: ${s.parts.floor}` },
       el('span', { class: 'vol', style: `width:${s.parts.accel}%` }), el('span', { class: 'act', style: `width:${s.parts.sales}%` }), el('span', { class: 'attn', style: `width:${s.parts.rank}%` }), el('span', { class: 'price', style: `width:${s.parts.floor}%` }));
@@ -339,6 +361,7 @@ function renderNfts() {
     [['vol', 'Doba względem tygodnia'], ['act', 'Liczba sprzedaży'], ['attn', 'Pozycja w trendach OpenSea'], ['price', 'Wzrost floor']].map(([k, n]) => el('span', null, el('i', { style: `background:var(--p-${k})` }), n)));
   const cg = S.topics.cgNfts || [];
   put(view,
+    nftFilter,
     legend,
     el('div', { class: 'tablewrap' }, S.nfts.length ? el('table', null, el('thead', null, head), el('tbody', null, rows)) : el('div', { class: 'empty', text: S.nftScannedAt ? 'OpenSea nie zwróciło kolekcji. Rozwiń „Źródła” u góry, żeby zobaczyć błąd.' : 'Pierwszy skan NFT jeszcze trwa.' })),
     cg.length ? el('p', { class: 'mute', style: 'margin-top:14px' }, 'Najczęściej wyszukiwane NFT na CoinGecko: ', cg.map((x, i) => el('span', null, i ? ', ' : '', x.name + ' (floor ' + (x.floor || '–') + ', ', pct(x.floorChg24), ')'))) : null);
@@ -415,7 +438,18 @@ function renderAlerts() {
   const all = alertRows();
   const mode = ui.ovMode;
   const kindOk = (r) => !ui.alertKind || (ui.alertKind === 'nft' ? r.type === 'nft' : r.type !== 'nft' && r.kind === ui.alertKind);
-  const rows = all.filter(kindOk);
+  const chainCounts = new Map();
+  for (const r of all.filter(kindOk)) chainCounts.set(r.chain || '–', (chainCounts.get(r.chain || '–') || 0) + 1);
+  if (ui.alertChain && !chainCounts.has(ui.alertChain)) ui.alertChain = '';
+  ui.alertSort = ui.alertSort || 'time';
+  const sorters = {
+    time: (a, b) => b.at - a.at,
+    score: (a, b) => (b.score || 0) - (a.score || 0),
+    chain: (a, b) => String(a.chain).localeCompare(String(b.chain)) || b.at - a.at,
+    h24: (a, b) => ((b.x.h24 && Number.isFinite(b.x.h24[0]) ? b.x.h24[0] : -1e9) - (a.x.h24 && Number.isFinite(a.x.h24[0]) ? a.x.h24[0] : -1e9)),
+    peak: (a, b) => ((b.x.h24 && b.x.h24[1] != null ? b.x.h24[1] : b.live && b.live.peak ? (b.live.peak / b.price0 - 1) * 100 : -1e9) - (a.x.h24 && a.x.h24[1] != null ? a.x.h24[1] : a.live && a.live.peak ? (a.live.peak / a.price0 - 1) * 100 : -1e9)),
+  };
+  const rows = all.filter(kindOk).filter((r) => !ui.alertChain || (r.chain || '–') === ui.alertChain).sort(sorters[ui.alertSort]);
   const tokens = rows.filter((r) => r.type !== 'nft');
   const UP = ui.upMin, DN = ui.downMin; // progi w % (liczby dodatnie) albo null
 
@@ -462,6 +496,9 @@ function renderAlerts() {
   };
   const controls = el('div', { class: 'ovctl' },
     el('div', { class: 'filters' }, el('span', { class: 'ovlbl', text: 'Rodzaj' }), chip(ui.alertKind === '', 'Wszystkie', () => { ui.alertKind = ''; render(); }), chip(ui.alertKind === 'early', 'Wczesne', () => { ui.alertKind = 'early'; render(); }), chip(ui.alertKind === 'momentum', 'Gorące', () => { ui.alertKind = 'momentum'; render(); }), chip(ui.alertKind === 'nft', 'NFT', () => { ui.alertKind = 'nft'; render(); })),
+    el('div', { class: 'filters' }, el('span', { class: 'ovlbl', text: 'Sieć' }),
+      chip(!ui.alertChain, 'Wszystkie', () => { ui.alertChain = ''; render(); }),
+      [...chainCounts].sort((a, b) => b[1] - a[1]).map(([c, n]) => chip(ui.alertChain === c, `${c} (${n})`, () => { ui.alertChain = c; render(); }))),
     el('div', { class: 'filters' }, el('span', { class: 'ovlbl', text: 'Licz' }),
       chip(mode === 'chg', 'zmianę po czasie', () => { ui.ovMode = 'chg'; render(); }, 'Cena dokładnie po 1 h, 24 h, 72 h, 7 dniach względem ceny z alertu'),
       chip(mode === 'ext', 'szczyt i dołek w tym czasie', () => { ui.ovMode = 'ext'; render(); }, 'Najwyższa i najniższa cena od alertu do końca okna – czy była okazja do zysku i jak głęboko spadło po drodze')),
@@ -483,8 +520,10 @@ function renderAlerts() {
   ui.histShow = ui.histShow || 100;
   const E = S.config.early;
   const tgOn = S.config.telegram.connected;
+  const sortSel = el('label', { class: 'mute', style: 'display:inline-flex;gap:6px;align-items:center;font-size:13px' }, 'Sortuj listy:',
+    el('select', { onchange: (e) => { ui.alertSort = e.target.value; render(); } }, [['time', 'najnowsze'], ['score', 'wynik'], ['chain', 'sieć'], ['h24', 'zmiana po 24 h'], ['peak', 'szczyt 24 h']].map(([v, t]) => el('option', { value: v, selected: ui.alertSort === v, text: t }))));
   put(view,
-    el('h2', { class: 'ovsec', text: 'Skuteczność alertów z ostatnich 30 dni' }),
+    el('h2', { class: 'ovsec', text: 'Skuteczność alertów z ostatnich 30 dni' + (ui.alertChain ? ` – ${ui.alertChain}` : '') }),
     controls,
     el('div', { class: 'ovgrid' }, cards),
     el('p', { class: 'mute', style: 'margin:6px 0 14px;font-size:13px;max-width:92ch', text: (mode === 'chg'
@@ -492,7 +531,7 @@ function renderAlerts() {
       : 'Szczyt i dołek: najwyższa i najniższa cena od alertu do końca okna (72 h i 7 dni ze świec godzinowych GeckoTerminal). ') +
       'Token, który zniknął, liczy się jako −100%. Poniżej około 30 sprawdzonych wynik niewiele mówi.' }),
     matchedBlock,
-    el('h2', { class: 'ovsec', text: `Alerty z ostatnich 24 h (${recent.length})` }),
+    el('div', { class: 'filters', style: 'justify-content:space-between;margin-bottom:6px' }, el('h2', { class: 'ovsec', style: 'margin:0', text: `Alerty z ostatnich 24 h (${recent.length})` }), sortSel),
     tgOn ? null : el('p', { class: 'mute', style: 'margin:0 0 8px', text: 'Telegram nie jest połączony, więc alerty zapisują się tylko tutaj.' }),
     recent.length ? alertTable(recent, mode) : el('div', { class: 'tablewrap' }, el('div', { class: 'empty', text: `W ciągu ostatniej doby nie było alertu. Wczesny sygnał powstaje od wyniku ${E.minScore}, alert „gorący” od ${S.config.alerts.minScore}.` })),
     el('div', { class: 'rowbtn', style: 'margin:12px 0' },
@@ -588,8 +627,90 @@ function alertDetail(a) {
     el('div', { class: 'links' }, link(a.url, 'Wykres'), link(d.pumpUrl, 'pump.fun')),
     d.address ? el('div', { class: 'addr', style: 'margin-top:8px', text: d.address }) : null,
     d.address ? el('button', { class: 'linkbtn', style: 'font-size:13px', text: 'Kopiuj adres', onclick: (e) => { e.stopPropagation(); navigator.clipboard.writeText(d.address).then(() => { e.target.textContent = 'Skopiowano'; }); } }) : null);
-  return el('div', { class: 'dgrid' }, results, why, atAlert, links);
+  return el('div', null, el('div', { class: 'dgrid' }, results, why, atAlert, links), extraDetail(a));
 }
+
+// Dane dodatkowe przy alercie: rynek, posiadacze, insiderzy i twórca, transakcje, Telegram, realne wejście.
+function extraDetail(a) {
+  const d = a.d || {};
+  const en = a.enrich || {};
+  const ea = en.alert || {};
+  const li = (label, ...val) => el('li', null, el('span', { class: 'mute', text: label + ': ' }), ...val);
+  const n0 = (x) => (x == null ? '–' : nf({ maximumFractionDigits: 0 }).format(x));
+  const sec = d.secInfo || {};
+  const ins = ea.insiders || {};
+  const blocks = [];
+
+  const m = d.market;
+  if (m) {
+    const row = (k, lbl) => (m[k] ? li(lbl, pct(m[k].h1), ' 1 h, ', pct(m[k].h24), ' 24 h') : null);
+    blocks.push(el('div', null, el('h3', { text: 'Rynek w chwili alertu' }), el('ul', null,
+      row('btc', 'BTC'), row('sol', 'SOL'), row('eth', 'ETH'), row('bnb', 'BNB'),
+      m.memes ? li('Memecoiny (narracje DexScreener)', pct(m.memes.h1), ' 1 h, ', pct(m.memes.h24), ' 24 h') : null)));
+  }
+
+  const hp = d.holdersPre;
+  const hAt = ea.holders ? ea.holders.count : hp ? hp.count : sec.holders;
+  const after = ['h1', 'h24', 'h72', 'd7'].map((t) => [t, en[t] && en[t].holders ? en[t].holders.count : null]).filter(([, v]) => v != null);
+  const top10 = (ea.holders && ea.holders.top10) ?? ins.top10Pct ?? sec.top10Pct;
+  blocks.push(el('div', null, el('h3', { text: 'Posiadacze' }), el('ul', null,
+    li('Przy alercie', n0(hAt)),
+    hp && hp.change != null ? li('Przed alertem', (hp.change >= 0 ? '+' : '') + n0(hp.change), ` w ${hp.minutes} min`, hp.changePct != null ? ` (${hp.changePct > 0 ? '+' : ''}${hp.changePct}%)` : '') : li('Przed alertem', el('span', { class: 'mute', text: 'brak wcześniejszego pomiaru' })),
+    after.length ? li('Po alercie', after.map(([t, v]) => `${{ h1: '1 h', h24: '24 h', h72: '72 h', d7: '7 dni' }[t]}: ${n0(v)}${hAt ? ` (${v - hAt >= 0 ? '+' : ''}${n0(v - hAt)})` : ''}`).join(', ')) : null,
+    top10 != null ? li('Top 10 portfeli', nf({ maximumFractionDigits: 1 }).format(top10) + '% podaży') : null)));
+
+  const lp = ins.lpLockedPct ?? sec.lpLockedPct;
+  const creator = ins.creatorPct ?? sec.creatorPct;
+  const insItems = [
+    ins.insidersDetected != null ? li('Wykryci insiderzy', n0(ins.insidersDetected) + (ins.insiderNetworks ? ` w ${ins.insiderNetworks} sieciach powiązanych portfeli` : '')) : null,
+    ins.insiderPctTop != null ? li('Insiderzy wśród top posiadaczy', `${nf({ maximumFractionDigits: 1 }).format(ins.insiderPctTop)}% podaży (${ins.insiderHoldersTop} portfeli)`) : null,
+    creator != null ? li('Twórca', nf({ maximumFractionDigits: 2 }).format(creator) + '% podaży') : null,
+    sec.ownerPct != null ? li('Właściciel kontraktu', nf({ maximumFractionDigits: 2 }).format(sec.ownerPct) + '%') : null,
+    lp != null ? li('Płynność zablokowana / spalona', nf({ maximumFractionDigits: 1 }).format(lp) + '%') : null,
+    sec.buyTax != null || sec.sellTax != null ? li('Podatek kupno / sprzedaż', `${sec.buyTax ?? '–'}% / ${sec.sellTax ?? '–'}%`) : null,
+    ins.rugged ? li('RugCheck', el('span', { class: 'down', text: 'oznaczony jako rug' })) : null,
+  ].filter(Boolean);
+  blocks.push(el('div', null, el('h3', { text: 'Insiderzy, twórca, płynność' }),
+    insItems.length ? el('ul', null, insItems) : el('p', { class: 'mute', text: a.chain === 'solana' ? 'Raport RugCheck jeszcze nie dotarł albo nie zawiera tych danych.' : 'Brak danych dla tej sieci.' })));
+
+  const tr = ea.trades;
+  const tradeDiv = el('div', null, el('h3', { text: 'Transakcje przy alercie' }));
+  if (tr) {
+    const B = tr.bucketsBuy || [];
+    tradeDiv.append(el('ul', null,
+      li('Ostatnie transakcje', `${tr.n} w ${tr.spanMin ?? '–'} min (kupna ${tr.buy.n}, sprzedaże ${tr.sell.n})`),
+      li('Kupno: średnio / mediana / 90%', `${usd(tr.buy.avg)} / ${usd(tr.buy.med)} / ${usd(tr.buy.p90)}`),
+      li('Rozkład kupna', `<$50: ${B[0] || 0}, $50–500: ${B[1] || 0}, $500–5 tys.: ${B[2] || 0}, ≥$5 tys.: ${B[3] || 0}`),
+      li('Unikalni kupujący / sprzedający', `${tr.uniqueBuyers} / ${tr.uniqueSellers}`),
+      tr.top5Share != null ? li('Top 5 kupujących', `${nf({ maximumFractionDigits: 1 }).format(tr.top5Share)}% wolumenu kupna`) : null,
+      li('Kupujący 3+ razy', String(tr.repeatBuyers)),
+      li('Saldo kupno − sprzedaż', usd(tr.netUsd))));
+  } else if (d.avgTx) tradeDiv.append(el('ul', null, li('Średnia transakcja 1 h', usd(d.avgTx.h1)), li('Średnia transakcja 24 h', usd(d.avgTx.h24))));
+  else tradeDiv.append(el('p', { class: 'mute', text: 'Brak danych o transakcjach.' }));
+  blocks.push(tradeDiv);
+
+  const tp = d.tgPre;
+  const tgAt = ea.tgMembers ?? (tp && tp.count);
+  if (d.tgLink || tgAt != null) {
+    const tgAfter = ['h1', 'h24', 'h72', 'd7'].map((t) => [t, en[t] && en[t].tgMembers]).filter(([, v]) => v != null);
+    blocks.push(el('div', null, el('h3', { text: 'Kanał Telegram tokena' }), el('ul', null,
+      li('Członków przy alercie', n0(tgAt)),
+      tp && tp.change != null ? li('Przed alertem', (tp.change >= 0 ? '+' : '') + n0(tp.change), ` w ${tp.minutes} min`) : null,
+      tgAfter.length ? li('Po alercie', tgAfter.map(([t, v]) => `${{ h1: '1 h', h24: '24 h', h72: '72 h', d7: '7 dni' }[t]}: ${n0(v)}`).join(', ')) : null),
+      d.tgLink ? link(d.tgLink, 'Otwórz kanał') : null));
+  }
+
+  const c2 = a.checks && a.checks.m2, c5 = a.checks && a.checks.m5;
+  if (c2 || c5) {
+    const v = (c) => (!c ? el('span', { class: 'mute', text: 'czekam' }) : c.missed ? el('span', { class: 'mute', text: 'pominięty' }) : pct(c.chg));
+    blocks.push(el('div', null, el('h3', { text: 'Realne wejście' }), el('ul', null,
+      li('Cena 2 min po alercie', v(c2)), li('Cena 5 min po alercie', v(c5))),
+      el('p', { class: 'mute', style: 'margin:4px 0 0;font-size:13px', text: 'Tyle mniej więcej ucieka, zanim zdążysz kupić.' })));
+  }
+  return el('div', { class: 'dgrid', style: 'margin-top:16px;padding-top:14px;border-top:1px solid var(--line)' }, blocks);
+}
+
+
 
 // Dane alertów: lokalnie /api/alerts, na GitHubie alerts-live.json i alerts-index.json z tego samego commita co data.json.
 let ALERTS = null, alertsSha = null;
