@@ -47,7 +47,7 @@ const PARTS = [['vol', 'Przyspieszenie wolumenu', 28], ['act', 'Aktywność', 20
 const EPARTS = [['demand', 'Rosnący popyt', 30, 'vol'], ['buyers', 'Kupujący', 20, 'buy'], ['room', 'Zapas ceny', 20, 'price'], ['value', 'Wycena', 15, 'act'], ['fresh', 'Świeżość', 15, 'attn']];
 const isEarly = () => ui.tab === 'early';
 
-const ui = { tab: 'early', q: '', chain: '', minLiq: 0, hideCrit: true, sort: 'score', meta: '', open: new Set(), openAlerts: new Set(), settingsBuilt: false };
+const ui = { tab: 'early', q: '', chain: '', minLiq: 0, hideCrit: true, sort: 'score', meta: '', open: new Set(), openAlerts: new Set(), upMin: null, downMin: null, settingsBuilt: false };
 let S = null;
 
 // ---- Skąd dane -------------------------------------------------------------
@@ -127,7 +127,7 @@ function render() {
   $('ctTokens').textContent = S.tokens.length || '';
   $('ctPump').textContent = S.tokens.filter((t) => t.isPump).length || '';
   $('ctNft').textContent = S.nfts.length || '';
-  $('ctAlerts').textContent = S.alerts.length || '';
+  $('ctAlerts').textContent = (S.alertsCount && S.alertsCount.day) || '';
   for (const b of document.querySelectorAll('.tab')) b.setAttribute('aria-selected', String(b.dataset.tab === ui.tab));
   if (ui.tab === 'settings') return renderSettings();
   ui.settingsBuilt = false;
@@ -344,94 +344,164 @@ function renderNfts() {
     cg.length ? el('p', { class: 'mute', style: 'margin-top:14px' }, 'Najczęściej wyszukiwane NFT na CoinGecko: ', cg.map((x, i) => el('span', null, i ? ', ' : '', x.name + ' (floor ' + (x.floor || '–') + ', ', pct(x.floorChg24), ')'))) : null);
 }
 
-function renderAlerts() {
-  const view = $('view');
-  const tgOn = S.config.telegram.connected;
-  const tracked = (a) => a.type === 'token' && a.price0 > 0;
-  const chk = (a, name) => {
-    if (!tracked(a)) return el('span', { class: 'mute', text: '–' });
-    const c = a.checks && a.checks[name];
-    if (!c) return el('span', { class: 'mute', text: 'czekam' });
-    if (c.missed) return el('span', { class: 'mute', text: 'pominięty', title: 'Aplikacja była wtedy wyłączona albo źródło nie odpowiadało' });
-    if (c.dead) return el('span', { class: 'down', text: 'zniknął', title: 'DexScreener nie zna już tego tokena – liczony jako −100%' });
-    const n = pct(c.chg);
-    if (c.rug) { n.textContent += ' !'; n.title = 'Płynność spadła poniżej 1/5 tej z chwili alertu'; }
-    return n;
-  };
-  const win = (w) => (!w || !w.n ? el('span', { class: 'mute', text: 'jeszcze brak' }) : el('span', { title: `${w.up}% na plusie, mediana ${w.median}%, średnio ${w.avg}%; ${w.big}% zyskało co najmniej 50%, ${w.bad}% straciło co najmniej 50% (sprawdzonych: ${w.n})` }, `${w.up}% · `, pct(w.median), el('span', { class: 'mute', text: ` (${w.n})` })));
-  const peakCell = (p) => (!p || !p.n ? el('span', { class: 'mute', text: 'jeszcze brak' }) : el('span', { title: `mediana szczytu ${p.median}%; ${p.p20}% doszło do +20%, ${p.p50}% do +50%; mediana czasu do szczytu: ${p.min} min` }, pct(p.median), ` · ${p.p20}%`));
-  const statRow = (label, o, sub) => el('tr', { class: 'row', style: 'cursor:default' },
-    el('td', { class: 'l', style: 'font-family:var(--ui);' + (sub ? 'padding-left:22px;color:var(--muted)' : 'font-weight:600'), text: label }),
-    el('td', { text: o ? o.n : 0 }),
-    el('td', null, win(o && o.h1)), el('td', null, win(o && o.h6)), el('td', null, win(o && o.h24)),
-    el('td', null, peakCell(o && o.peak)),
-    el('td', { text: o && o.dead ? String(o.dead) : '–', title: 'Token zniknął albo płynność spadła poniżej 1/5 – w ciągu 24 h' }));
-  const HIST = S.history;
-  ui.hist = ui.hist || 'd7';
-  let stats;
-  if (HIST && HIST.periods) {
-    const P = HIST[ui.hist] || HIST.all;
-    const tabs = el('div', { class: 'filters', style: 'margin-bottom:8px' }, HIST.periods.map((p) =>
-      el('button', { class: 'topic', 'aria-pressed': String(ui.hist === p.key), style: 'padding:4px 12px', onclick: () => { ui.hist = p.key; render(); } }, el('div', { class: 'nm', text: p.label }))));
-    const rows = [];
-    for (const [k, label] of [['early', 'Wczesne sygnały'], ['momentum', 'Gorące teraz']]) {
-      rows.push(statRow(label, P.kinds[k]));
-      for (const b of P.buckets[k]) if (b.n) rows.push(statRow('wynik ' + b.label, b, true));
-    }
-    if (P.chains.length) {
-      rows.push(el('tr', null, el('td', { class: 'l', colspan: '7', style: 'font:600 12.5px var(--ui);color:var(--muted);padding-top:14px', text: 'Według sieci' })));
-      for (const c of P.chains) rows.push(statRow(c.chain, c, true));
-    }
-    const closed = P.all.h24.n;
-    stats = el('div', null,
-      el('h2', { style: 'font:600 15px/1.2 var(--ui);margin:0 0 8px', text: 'Skuteczność alertów' }),
-      tabs,
-      el('div', { class: 'tablewrap', style: 'margin-bottom:8px' }, el('table', { style: 'min-width:720px' },
-        el('thead', null, el('tr', null, ['Rodzaj', 'Alertów', 'Po 1 h', 'Po 6 h', 'Po 24 h', 'Szczyt w 24 h', 'Zniknęło'].map((h, i) => el('th', { class: i === 0 ? 'l' : '', text: h })))),
-        el('tbody', null, rows))),
-      el('p', { class: 'mute', style: 'margin:0 0 18px;max-width:90ch;font-size:13px', text:
-        'Po 1/6/24 h: odsetek alertów na plusie · mediana zmiany ceny od chwili alertu (w nawiasie liczba sprawdzonych). Szczyt: mediana najwyższej ceny w ciągu 24 h · odsetek, który doszedł do +20%. Najedź na wartość po szczegóły. ' +
-        (HIST.first ? `Dziennik od ${new Date(HIST.first).toLocaleDateString('pl-PL')}, łącznie ${HIST.total} alertów. ` : '') +
-        (closed < 30 ? `Zamkniętych po 24 h w tym okresie: ${closed} – poniżej około 30 wynik niewiele mówi.` : 'Token, który zniknął z DexScreenera, liczy się jako −100%.') +
-        ' Pełna historia z wszystkimi danymi: /eksport w Telegramie.' }));
-  } else {
-    stats = el('p', { class: 'mute', text: 'Statystyki pojawią się po pierwszym alercie zapisanym w dzienniku.' });
-  }
+// ---- Zakładka Alerty ------------------------------------------------------------
 
+const WINS = [['h1', '1 h'], ['h24', '24 h'], ['h72', '72 h'], ['d7', '7 dni']];
+const WIN_MS = { h1: 3.6e6, h24: 864e5, h72: 3 * 864e5, d7: 7 * 864e5 };
+
+// Wspólny format wiersza z indeksu (30 dni) i z listy 24 h (bieżące szczyty).
+function alertRows() {
+  const byId = new Map();
+  for (const r of (ALERTS && ALERTS.index && ALERTS.index.rows) || []) {
+    byId.set(r.id, { id: r.id, at: r.at, type: r.t === 'n' ? 'nft' : 'token', kind: r.t === 'e' ? 'early' : 'momentum', symbol: r.s, chain: r.c, score: r.sc, risk: r.r, price0: r.p0, sent: !!r.se, x: r.x || {} });
+  }
+  for (const a of (ALERTS && ALERTS.live && ALERTS.live.alerts) || []) {
+    const x = {};
+    for (const [w] of WINS) {
+      const c = a.checks && a.checks[w];
+      if (c) x[w] = c.missed ? ['m'] : [c.chg, c.pk ?? null, c.lo ?? null, c.dead ? 'd' : c.rug ? 'r' : c.approx ? 'a' : ''];
+    }
+    byId.set(a.id || a.at + a.symbol, Object.assign({}, byId.get(a.id) || {}, { id: a.id, at: a.at, type: a.type, kind: a.kind || 'momentum', symbol: a.symbol, chain: a.chain, score: a.score, risk: a.risk, price0: a.price0, sent: a.sent, error: a.error, x, live: a }));
+  }
+  return [...byId.values()].sort((a, b) => b.at - a.at);
+}
+
+const pctTxt = (v) => (v > 0 ? '+' : '') + nf({ maximumFractionDigits: Math.abs(v) >= 100 ? 0 : 1 }).format(v) + '%';
+// Komórka wyniku okna: zmiana ceny (albo szczyt / dołek w trybie „szczyt i dołek”).
+function winCell(r, w, mode) {
+  const v = r.x && r.x[w];
+  if (r.type === 'nft') return el('span', { class: 'mute', text: '–' });
+  if (!v) return el('span', { class: 'mute', text: Date.now() - r.at < WIN_MS[w] ? 'czekam' : '–' });
+  if (v[0] === 'm') return el('span', { class: 'mute', text: 'pominięty', title: 'Aplikacja była wtedy wyłączona albo źródło nie odpowiadało' });
+  const tip = `zmiana ${pctTxt(v[0])}` + (v[1] != null ? `, szczyt ${pctTxt(v[1])}, dołek ${pctTxt(v[2])}` : '') + (v[3] === 'a' ? ' (szczyt przybliżony)' : '');
+  if (v[3] === 'd') return el('span', { class: 'down', text: 'zniknął', title: 'Token zniknął z DexScreenera – liczony jako −100%' });
+  if (mode === 'ext' && v[1] != null) return el('span', { title: tip }, pct(v[1]), el('span', { class: 'mute', text: ' / ' }), pct(v[2]));
+  const n = pct(v[0]);
+  n.title = tip;
+  if (v[3] === 'r') n.textContent += ' !';
+  return n;
+}
+
+function alertTable(rows, mode) {
   const when = (t) => new Date(t).toLocaleString('pl-PL', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' });
   const KIND = { early: 'wczesny', momentum: 'gorący' };
-  // Pełna lista z wynikami i szczegółami (alerts.json); do czasu jej pobrania – skrócona z danych strony.
-  const all = (ALERTS && ALERTS.alerts) || S.alerts;
-  ui.alertKind = ui.alertKind || '';
-  const list = all.filter((a) => !ui.alertKind || (ui.alertKind === 'nft' ? a.type === 'nft' : a.type !== 'nft' && (a.kind || 'momentum') === ui.alertKind));
-  const akey = (a) => a.id || a.at + ':' + a.symbol;
-  const rows = [];
-  for (const a of list) {
-    const open = ui.openAlerts.has(akey(a));
-    const toggle = () => { open ? ui.openAlerts.delete(akey(a)) : ui.openAlerts.add(akey(a)); render(); };
-    rows.push(el('tr', { class: 'row r-' + (a.risk || 'none'), tabindex: '0', 'aria-expanded': String(open), onclick: toggle, onkeydown: (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggle(); } } },
-      el('td', { class: 'l', text: when(a.at) }),
-      el('td', { class: 'l', style: 'font-family:var(--ui)' }, el('b', { text: a.symbol }), a.chain ? el('span', { class: 'chain', text: a.chain }) : null),
-      el('td', { class: 'l', style: 'font-family:var(--ui)', text: a.type === 'nft' ? 'NFT' : KIND[a.kind || 'momentum'] }),
-      el('td', { text: Math.round(a.score) }),
-      el('td', { text: tracked(a) ? price(a.price0) : '–' }),
-      el('td', null, chk(a, 'h1')), el('td', null, chk(a, 'h6')), el('td', null, chk(a, 'h24')),
-      el('td', null, tracked(a) && a.peak > 0 ? pct((a.peak / a.price0 - 1) * 100) : el('span', { class: 'mute', text: '–' })),
-      el('td', { class: 'l', style: 'font-family:var(--ui);font-size:13px' }, el('span', { class: a.sent ? 'up' : 'mute', text: a.sent ? 'wysłano' : a.error || 'nie wysłano' }))));
-    if (open) rows.push(el('tr', { class: 'detail' }, el('td', { colspan: '10' }, alertDetail(a))));
+  const body = [];
+  for (const r of rows) {
+    const key = r.id || r.at + r.symbol;
+    const open = ui.openAlerts.has(key);
+    const toggle = () => { open ? ui.openAlerts.delete(key) : ui.openAlerts.add(key); if (!open) loadDetail(r.id); render(); };
+    const peak24 = r.live && r.live.peak > 0 && r.price0 > 0 && !(r.x.h24 && r.x.h24[1] != null) ? (r.live.peak / r.price0 - 1) * 100 : r.x.h24 && r.x.h24[1];
+    body.push(el('tr', { class: 'row r-' + (r.risk || 'none'), tabindex: '0', 'aria-expanded': String(open), onclick: toggle, onkeydown: (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggle(); } } },
+      el('td', { class: 'l', text: when(r.at) }),
+      el('td', { class: 'l', style: 'font-family:var(--ui)' }, el('b', { text: r.symbol }), r.chain ? el('span', { class: 'chain', text: r.chain }) : null),
+      el('td', { class: 'l', style: 'font-family:var(--ui)', text: r.type === 'nft' ? 'NFT' : KIND[r.kind] }),
+      el('td', { text: r.score == null ? '–' : Math.round(r.score) }),
+      el('td', { text: r.type === 'nft' ? '–' : price(r.price0) }),
+      WINS.map(([w]) => el('td', null, winCell(r, w, mode))),
+      el('td', null, peak24 != null && r.type !== 'nft' ? pct(peak24) : el('span', { class: 'mute', text: '–' })),
+      el('td', { class: 'l', style: 'font-family:var(--ui);font-size:13px' }, el('span', { class: r.sent ? 'up' : 'mute', text: r.sent ? 'wysłano' : r.error || 'nie wysłano' }))));
+    if (open) body.push(el('tr', { class: 'detail' }, el('td', { colspan: '11' }, detailFor(r))));
   }
+  return el('div', { class: 'tablewrap' }, el('table', null,
+    el('thead', null, el('tr', null, ['Czas', 'Token', 'Rodzaj', 'Wynik', 'Cena przy alercie', ...WINS.map(([, l]) => (mode === 'ext' ? `Szczyt / dołek ${l}` : `Po ${l}`)), 'Szczyt 24 h', 'Telegram'].map((h, i) => el('th', { class: i < 3 || i === 10 ? 'l' : '', text: h })))),
+    el('tbody', null, body)));
+}
+
+function renderAlerts() {
+  const view = $('view');
+  ui.alertKind = ui.alertKind || '';
+  ui.ovMode = ui.ovMode || 'chg';
+  ui.ovWin = ui.ovWin || 'h24';
+  const all = alertRows();
+  const mode = ui.ovMode;
+  const kindOk = (r) => !ui.alertKind || (ui.alertKind === 'nft' ? r.type === 'nft' : r.type !== 'nft' && r.kind === ui.alertKind);
+  const rows = all.filter(kindOk);
+  const tokens = rows.filter((r) => r.type !== 'nft');
+  const UP = ui.upMin, DN = ui.downMin; // progi w % (liczby dodatnie) albo null
+
+  // Wartość okna do porównań: zmiana po czasie albo szczyt / dołek w oknie.
+  const upVal = (v) => (mode === 'ext' ? v[1] : v[0]);
+  const dnVal = (v) => (mode === 'ext' ? v[2] : v[0]);
+  const measured = (r, w) => r.x[w] && r.x[w][0] !== 'm' && Number.isFinite(r.x[w][0]) && (mode === 'chg' || r.x[w][1] != null);
+  const match = (r, w) => {
+    if (!measured(r, w)) return false;
+    const v = r.x[w];
+    return (UP != null && upVal(v) >= UP) || (DN != null && dnVal(v) <= -DN);
+  };
+
+  const share = (k, n) => (n ? ` (${Math.round((100 * k) / n)}%)` : '');
+  const median = (v) => { const s = v.slice().sort((a, b) => a - b); return s.length % 2 ? s[(s.length - 1) / 2] : (s[s.length / 2 - 1] + s[s.length / 2]) / 2; };
+  const cards = WINS.map(([w, label]) => {
+    const m = tokens.filter((r) => measured(r, w));
+    const waiting = tokens.filter((r) => !r.x[w] && Date.now() - r.at < WIN_MS[w] + 12 * 3.6e6).length;
+    const lines = [];
+    if (!m.length) lines.push(el('div', { class: 'mute', text: waiting ? `${waiting} w trakcie pomiaru` : 'brak danych' }));
+    else if (mode === 'chg') {
+      const up = m.filter((r) => r.x[w][0] > 0).length, dn = m.filter((r) => r.x[w][0] < 0).length;
+      lines.push(el('div', null, el('span', { class: 'up', text: '▲ ' }), `wzrosło ${up}${share(up, m.length)}`));
+      lines.push(el('div', null, el('span', { class: 'down', text: '▼ ' }), `spadło ${dn}${share(dn, m.length)}`));
+      lines.push(el('div', { class: 'mute' }, 'mediana ', pct(median(m.map((r) => r.x[w][0])))));
+    } else {
+      lines.push(el('div', null, 'mediana szczytu ', pct(median(m.map((r) => r.x[w][1])))));
+      lines.push(el('div', null, 'mediana dołka ', pct(median(m.map((r) => r.x[w][2])))));
+    }
+    if (m.length && UP != null) { const k = m.filter((r) => upVal(r.x[w]) >= UP).length; lines.push(el('div', { class: 'up', style: 'font-weight:600', text: `≥ +${UP}%: ${k}${share(k, m.length)}` })); }
+    if (m.length && DN != null) { const k = m.filter((r) => dnVal(r.x[w]) <= -DN).length; lines.push(el('div', { class: 'down', style: 'font-weight:600', text: `≤ −${DN}%: ${k}${share(k, m.length)}` })); }
+    return el('button', { class: 'ovcard', 'aria-pressed': String(ui.ovWin === w), onclick: () => { ui.ovWin = w; render(); } },
+      el('div', { class: 'ovh', text: (mode === 'ext' ? 'W ciągu ' : 'Po ') + label }),
+      el('div', { class: 'ovn', text: m.length ? `${m.length} sprawdzonych` + (waiting ? `, ${waiting} w toku` : '') : '' }),
+      ...lines);
+  });
+
+  const chip = (on, label, click, title) => el('button', { class: 'topic', 'aria-pressed': String(on), title, style: 'padding:4px 12px', onclick: click }, el('div', { class: 'nm', text: label }));
+  const thr = (key, sign, presets) => {
+    const cur = ui[key];
+    const input = el('input', { type: 'number', min: '1', step: '1', placeholder: 'własny', 'aria-label': 'Własny próg w procentach', value: cur != null && !presets.includes(cur) ? cur : '', style: 'width:90px',
+      onchange: (e) => { const v = parseFloat(String(e.target.value).replace(',', '.')); ui[key] = isFinite(v) && v > 0 ? Math.abs(v) : null; render(); } });
+    return [chip(cur == null, 'bez progu', () => { ui[key] = null; render(); }), ...presets.map((p) => chip(cur === p, `${sign}${p}%`, () => { ui[key] = p; render(); })), input, el('span', { class: 'mute', text: '%' })];
+  };
+  const controls = el('div', { class: 'ovctl' },
+    el('div', { class: 'filters' }, el('span', { class: 'ovlbl', text: 'Rodzaj' }), chip(ui.alertKind === '', 'Wszystkie', () => { ui.alertKind = ''; render(); }), chip(ui.alertKind === 'early', 'Wczesne', () => { ui.alertKind = 'early'; render(); }), chip(ui.alertKind === 'momentum', 'Gorące', () => { ui.alertKind = 'momentum'; render(); }), chip(ui.alertKind === 'nft', 'NFT', () => { ui.alertKind = 'nft'; render(); })),
+    el('div', { class: 'filters' }, el('span', { class: 'ovlbl', text: 'Licz' }),
+      chip(mode === 'chg', 'zmianę po czasie', () => { ui.ovMode = 'chg'; render(); }, 'Cena dokładnie po 1 h, 24 h, 72 h, 7 dniach względem ceny z alertu'),
+      chip(mode === 'ext', 'szczyt i dołek w tym czasie', () => { ui.ovMode = 'ext'; render(); }, 'Najwyższa i najniższa cena od alertu do końca okna – czy była okazja do zysku i jak głęboko spadło po drodze')),
+    el('div', { class: 'filters' }, el('span', { class: 'ovlbl', text: 'Wzrost o min.' }), ...thr('upMin', '+', [25, 50, 100])),
+    el('div', { class: 'filters' }, el('span', { class: 'ovlbl', text: 'Spadek o min.' }), ...thr('downMin', '−', [25, 50, 75])));
+
+  const winLabel = WINS.find(([w]) => w === ui.ovWin)[1];
+  const cond = [UP != null ? `${mode === 'ext' ? 'szczyt' : 'wzrost'} ≥ +${UP}%` : null, DN != null ? `${mode === 'ext' ? 'dołek' : 'spadek'} ≤ −${DN}%` : null].filter(Boolean).join(' lub ');
+  const matched = UP != null || DN != null ? tokens.filter((r) => match(r, ui.ovWin)) : [];
+  const matchedBlock = UP == null && DN == null
+    ? el('p', { class: 'mute', style: 'margin:4px 0 18px', text: 'Ustaw próg wzrostu albo spadku, żeby zobaczyć listę pasujących alertów. Kliknij kartę, żeby wybrać okno (1 h, 24 h, 72 h, 7 dni).' })
+    : el('div', { style: 'margin-bottom:22px' },
+        el('h2', { class: 'ovsec', text: `Pasujące alerty – ${mode === 'ext' ? 'w ciągu' : 'po'} ${winLabel}: ${cond} (${matched.length})` }),
+        matched.length ? alertTable(matched, mode) : el('p', { class: 'mute', text: 'Żaden alert nie spełnia tego warunku.' }));
+
+  const dayAgo = Date.now() - 864e5;
+  const recent = rows.filter((r) => r.at >= dayAgo);
+  const older = rows.filter((r) => r.at < dayAgo);
+  ui.histShow = ui.histShow || 100;
   const E = S.config.early;
-  const chip = (v, label) => el('button', { class: 'topic', 'aria-pressed': String(ui.alertKind === v), style: 'padding:4px 12px', onclick: () => { ui.alertKind = v; render(); } }, el('div', { class: 'nm', text: label }));
-  put(view, stats,
-    el('h2', { style: 'font:600 15px/1.2 var(--ui);margin:0 0 8px', text: 'Alerty' }),
-    el('div', { class: 'filters', style: 'margin-bottom:8px' }, chip('', 'Wszystkie'), chip('early', 'Wczesne'), chip('momentum', 'Gorące'), chip('nft', 'NFT'),
-      el('span', { class: 'mute', style: 'font-size:13px', text: 'Kliknij alert, żeby zobaczyć wykres ceny, powód wysłania i wyniki.' })),
-    tgOn ? null : el('p', { class: 'mute', style: 'margin:0 0 8px', text: 'Telegram nie jest połączony, więc alerty zapisują się tylko tutaj. Połącz go w zakładce Ustawienia.' }),
-    el('div', { class: 'tablewrap' }, list.length
-      ? el('table', null,
-          el('thead', null, el('tr', null, ['Czas', 'Token', 'Rodzaj', 'Wynik', 'Cena przy alercie', 'Po 1 h', 'Po 6 h', 'Po 24 h', 'Szczyt', 'Telegram'].map((h, i) => el('th', { class: i < 3 || i === 9 ? 'l' : '', text: h })))),
-          el('tbody', null, rows))
-      : el('div', { class: 'empty', text: all.length ? 'Brak alertów tego rodzaju.' : `Jeszcze żadnego. Wczesny sygnał powstaje od wyniku ${E.minScore}, alert „gorący” od ${S.config.alerts.minScore}; token z krytyczną flagą nie wywołuje żadnego.` })));
+  const tgOn = S.config.telegram.connected;
+  put(view,
+    el('h2', { class: 'ovsec', text: 'Skuteczność alertów z ostatnich 30 dni' }),
+    controls,
+    el('div', { class: 'ovgrid' }, cards),
+    el('p', { class: 'mute', style: 'margin:6px 0 14px;font-size:13px;max-width:92ch', text: (mode === 'chg'
+      ? 'Wzrosło / spadło: cena dokładnie po tym czasie względem ceny z chwili alertu. '
+      : 'Szczyt i dołek: najwyższa i najniższa cena od alertu do końca okna (72 h i 7 dni ze świec godzinowych GeckoTerminal). ') +
+      'Token, który zniknął, liczy się jako −100%. Poniżej około 30 sprawdzonych wynik niewiele mówi.' }),
+    matchedBlock,
+    el('h2', { class: 'ovsec', text: `Alerty z ostatnich 24 h (${recent.length})` }),
+    tgOn ? null : el('p', { class: 'mute', style: 'margin:0 0 8px', text: 'Telegram nie jest połączony, więc alerty zapisują się tylko tutaj.' }),
+    recent.length ? alertTable(recent, mode) : el('div', { class: 'tablewrap' }, el('div', { class: 'empty', text: `W ciągu ostatniej doby nie było alertu. Wczesny sygnał powstaje od wyniku ${E.minScore}, alert „gorący” od ${S.config.alerts.minScore}.` })),
+    el('div', { class: 'rowbtn', style: 'margin:12px 0' },
+      el('button', { class: 'btn ghost', 'aria-expanded': String(!!ui.histOpen), disabled: !older.length, onclick: () => { ui.histOpen = !ui.histOpen; render(); } },
+        (ui.histOpen ? 'Ukryj historię' : 'Historia') + ` (${older.length} starszych)`),
+      el('span', { class: 'mute', style: 'font-size:13px', text: 'Kliknij alert, żeby zobaczyć wykres ceny, powód wysłania i wyniki. Pełna historia z wszystkimi danymi: /eksport w Telegramie.' })),
+    ui.histOpen && older.length ? [alertTable(older.slice(0, ui.histShow), mode),
+      older.length > ui.histShow ? el('div', { class: 'rowbtn' }, el('button', { class: 'btn ghost', text: `Pokaż kolejne (${older.length - ui.histShow})`, onclick: () => { ui.histShow += 100; render(); } })) : null] : null);
+  if (!ALERTS) put(view, el('div', { class: 'empty', text: 'Pobieram alerty…' }));
 }
 
 // ---- Szczegóły pojedynczego alertu --------------------------------------------
@@ -486,16 +556,16 @@ function alertDetail(a) {
     if (!c) return li(label, el('span', { class: 'mute', text: 'czekam' }));
     if (c.missed) return li(label, el('span', { class: 'mute', text: 'pominięty (aplikacja nie działała)' }));
     if (c.dead) return li(label, el('span', { class: 'down', text: 'token zniknął (−100%)' }));
-    return li(label, pct(c.chg), c.p ? ` – ${price(c.p)}` : '', c.rug ? el('span', { class: 'down', text: ' – płynność wycofana' }) : '');
+    return li(label, pct(c.chg), c.p ? ` – ${price(c.p)}` : '', c.pk != null ? el('span', { class: 'mute', text: ` (szczyt ${pctTxt(c.pk)}, dołek ${pctTxt(c.lo)}${c.approx ? ', przybliżony' : ''})` }) : '', c.rug ? el('span', { class: 'down', text: ' – płynność wycofana' }) : '');
   };
   const peakPct = a.peak > 0 ? (a.peak / a.price0 - 1) * 100 : null;
   const lowPct = a.low > 0 ? (a.low / a.price0 - 1) * 100 : null;
-  const results = el('div', null, el('h3', { text: a.done ? 'Wyniki (zamknięte po 24 h)' : 'Wyniki (pomiar trwa)' }),
+  const results = el('div', null, el('h3', { text: a.done ? 'Wyniki (pomiar zakończony po 7 dniach)' : 'Wyniki (pomiar trwa)' }),
     priceChart(a),
     el('ul', { style: 'margin-top:8px' },
-      res('h1', 'Po 1 h'), res('h6', 'Po 6 h'), res('h24', 'Po 24 h'),
-      li('Szczyt', peakPct == null ? '–' : pct(peakPct), a.peakAt && a.peakAt > a.at ? ` po ${ago(a.peakAt)}` : ''),
-      li('Dołek', lowPct == null ? '–' : pct(lowPct), a.lowAt && a.lowAt > a.at ? ` po ${ago(a.lowAt)}` : '')));
+      res('h1', 'Po 1 h'), res('h6', 'Po 6 h'), res('h24', 'Po 24 h'), res('h72', 'Po 72 h'), res('d7', 'Po 7 dniach'),
+      li('Szczyt w 24 h', peakPct == null ? '–' : pct(peakPct), a.peakAt && a.peakAt > a.at ? ` po ${ago(a.peakAt)}` : ''),
+      li('Dołek w 24 h', lowPct == null ? '–' : pct(lowPct), a.lowAt && a.lowAt > a.at ? ` po ${ago(a.lowAt)}` : '')));
   const u = d.uniq;
   const atAlert = el('div', null, el('h3', { text: 'Stan w chwili alertu' }), el('ul', null,
     li('Cena', price(a.price0)), li('Płynność', usd(d.liq ?? a.liq0)), li('Wycena', usd(d.mc ?? a.mc0)),
@@ -521,24 +591,56 @@ function alertDetail(a) {
   return el('div', { class: 'dgrid' }, results, why, atAlert, links);
 }
 
-// Szczegóły alertów: lokalnie /api/alerts, na GitHubie alerts.json z tego samego commita co data.json.
+// Dane alertów: lokalnie /api/alerts, na GitHubie alerts-live.json i alerts-index.json z tego samego commita co data.json.
 let ALERTS = null, alertsSha = null;
+const rawUrl = (ref, file) => `https://raw.githubusercontent.com/${REMOTE.owner}/${REMOTE.repo}/${ref}/${file}`;
 async function loadAlerts() {
   try {
     if (!REMOTE) ALERTS = await toLogin(await fetch('/api/alerts', { cache: 'no-store' })).json();
-    else if (REMOTE.url) ALERTS = await (await fetch(REMOTE.url.replace(/data\.json(\?.*)?$/, 'alerts.json'), { cache: 'no-store' })).json();
-    else {
+    else if (REMOTE.url) {
+      const base = REMOTE.url.replace(/data\.json(\?.*)?$/, '');
+      const [live, index] = await Promise.all(['alerts-live.json', 'alerts-index.json'].map((f) => fetch(base + f, { cache: 'no-store' }).then((r) => r.json())));
+      ALERTS = { live, index };
+    } else {
       const ref = lastSha || REMOTE.branch;
       if (ref === alertsSha && ALERTS) return;
-      const r = await fetch(`https://raw.githubusercontent.com/${REMOTE.owner}/${REMOTE.repo}/${ref}/alerts.json` + (lastSha ? '' : '?t=' + Math.floor(Date.now() / 60000)));
-      if (!r.ok) return;
-      ALERTS = await r.json();
+      const q = lastSha ? '' : '?t=' + Math.floor(Date.now() / 60000);
+      const [live, index] = await Promise.all(['alerts-live.json', 'alerts-index.json'].map((f) => fetch(rawUrl(ref, f) + q).then((r) => (r.ok ? r.json() : null))));
+      if (!live || !index) return;
+      ALERTS = { live, index };
       alertsSha = ref;
     }
   } catch (e) {
-    // brak pliku (starsza wersja na Orange Pi) – zostaje skrócona lista z data.json
+    // pliki jeszcze nie istnieją (starsza wersja na Orange Pi) – spróbujemy przy następnym odświeżeniu
   }
   if (ui.tab === 'alerts' && S) render();
+}
+
+// Szczegóły jednego alertu pobieramy dopiero po jego rozwinięciu.
+const DETAILS = new Map();
+async function loadDetail(id) {
+  if (!id || DETAILS.has(id)) return;
+  DETAILS.set(id, 'loading');
+  try {
+    let r;
+    if (!REMOTE) r = await toLogin(await fetch('/api/alert?id=' + encodeURIComponent(id), { cache: 'no-store' }));
+    else if (REMOTE.url) r = await fetch(REMOTE.url.replace(/data\.json(\?.*)?$/, '') + `details/${id}.json`, { cache: 'no-store' });
+    else r = await fetch(rawUrl(lastSha || REMOTE.branch, `details/${id}.json`));
+    DETAILS.set(id, r.ok ? await r.json() : 'missing');
+  } catch (e) {
+    DETAILS.delete(id);
+  }
+  if (ui.tab === 'alerts') render();
+}
+
+function detailFor(r) {
+  const d = DETAILS.get(r.id);
+  if (d === 'loading' || (d == null && r.id)) return el('p', { class: 'mute', text: 'Wczytuję szczegóły…' });
+  // Bieżące dane z listy 24 h mają pierwszeństwo przed zapisanym plikiem (świeższy szczyt i wykres).
+  const a = Object.assign({}, d && d !== 'missing' ? d : {}, r.live || {});
+  a.d = (d && d !== 'missing' && d.d) || null;
+  if (!a.price0) Object.assign(a, { price0: r.price0, at: r.at, kind: r.kind, type: r.type, score: r.score, risk: r.risk, symbol: r.symbol, chain: r.chain });
+  return alertDetail(a);
 }
 
 // Na GitHubie ustawienia tylko pokazujemy – zmienia się je komendami w Telegramie
