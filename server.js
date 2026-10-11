@@ -21,7 +21,7 @@ const { Health } = require('./lib/health');
 const { backup } = require('./lib/backup');
 
 // Wersja danych i strony – strona porównuje ją ze swoją i prosi o odświeżenie, gdy się różnią.
-const APP_VERSION = 10;
+const APP_VERSION = 11;
 const { scoreToken, scoreEarly, scoreNft } = require('./lib/score');
 const security = require('./lib/security');
 const tg = require('./lib/telegram');
@@ -83,6 +83,8 @@ const DEFAULTS = {
   health: { enabled: true, afterMin: 30 }, // wiadomość na Telegram, gdy źródło nie działa od tylu minut
   // Codzienna kopia katalogu z danymi; dir puste = obok katalogu danych (…/krypto-radar-kopie).
   backup: { enabled: true, dir: '', keep: 14, hour: 4 },
+  // Solana: osobna zakładka na stronie i alerty bez powiadomień na Telegram (zapisywane i mierzone w tle).
+  solana: { separate: true, telegram: false },
 };
 
 function merge(base, over) {
@@ -225,7 +227,7 @@ function pruneAlerts() {
 // Szczegóły jednego alertu (DATA_DIR/details/<id>.json): obraz z chwili alertu, pomiary, przebieg ceny.
 // Zapisywane przy alercie i przy każdym pomiarze; strona pobiera je dopiero po rozwinięciu alertu.
 const DETAILS_DIR = path.join(DATA_DIR, 'details');
-const ROW_KEYS = ['id', 'at', 'type', 'kind', 'symbol', 'chain', 'score', 'risk', 'url', 'sent', 'error', 'price0', 'liq0', 'mc0', 'checks', 'peak', 'peakAt', 'low', 'lowAt', 'done', 'path', 'enrich'];
+const ROW_KEYS = ['id', 'at', 'type', 'kind', 'symbol', 'chain', 'score', 'risk', 'url', 'sent', 'error', 'price0', 'liq0', 'mc0', 'checks', 'peak', 'peakAt', 'low', 'lowAt', 'done', 'path', 'enrich', 'muted'];
 const rowOf = (a) => {
   const o = {};
   for (const k of ROW_KEYS) if (a[k] != null) o[k] = a[k];
@@ -273,7 +275,7 @@ function tokenSnapshot(t, kind, entry, threshold) {
   const s = t.s, e = t.e;
   return {
     t: 'call', id: entry.id, at: entry.at, iso: new Date(entry.at).toISOString(), type: 'token', kind,
-    sent: entry.sent, error: entry.error || null,
+    sent: entry.sent, error: entry.error || null, muted: entry.muted ? 1 : undefined,
     symbol: t.symbol, name: t.name, chain: t.chain, address: t.address, pairAddress: t.pairAddress, dexId: t.dexId,
     url: t.url, pumpUrl: t.pumpUrl || null, dataFrom: t.dataFrom,
     score: entry.score, threshold, risk: s.risk,
@@ -340,6 +342,11 @@ function memeHeat(metas) {
 }
 
 const telegramReady = () => !!(cfg.telegram.token && cfg.telegram.chatId);
+// Solana wyciszona: alerty zapisywane i mierzone, ale bez wiadomości na Telegram.
+const solMuted = (chain) => chain === 'solana' && !(cfg.solana && cfg.solana.telegram);
+const solApart = () => !cfg.solana || cfg.solana.separate !== false;
+// Czy token/alert z tej sieci należy do głównego widoku (Solana osobno).
+const mainScope = (chain) => !(solApart() && chain === 'solana');
 async function deliver(html) {
   if (!telegramReady()) return { sent: false, error: 'Telegram niepołączony' };
   try {
@@ -356,9 +363,11 @@ async function tokenAlerts(tokens, now, kind) {
   if (!cfg.alerts.enabled || (early && !cfg.early.enabled)) return 0;
   const cool = cfg.alerts.cooldownHours * 3.6e6;
   const list = early ? tokens.filter((t) => t.e && t.e.inScope).sort((a, b) => b.e.score - a.e.score) : tokens;
-  let n = 0;
+  let n = 0, nm = 0; // wysłane i wyciszone (Solana) – osobne limity, żeby Solana nie zabierała miejsca innym
   for (const t of list) {
-    if (n >= cfg.alerts.maxPerScan) break;
+    if (n >= cfg.alerts.maxPerScan && nm >= cfg.alerts.maxPerScan) break;
+    const muted = solMuted(t.chain);
+    if ((muted ? nm : n) >= cfg.alerts.maxPerScan) continue;
     if (!(early ? eligibleEarly(t) : eligible(t))) continue;
     const mark = (early ? 'e:' : '') + t.key;
     if (state.alerted[mark] && now - state.alerted[mark] < cool) continue;
@@ -366,12 +375,12 @@ async function tokenAlerts(tokens, now, kind) {
     if (early && (eligibleBase(t) || (state.alerted[t.key] && now - state.alerted[t.key] < cool))) continue;
     // Telegram tokena sprawdzamy tuż przed alertem (jedno–dwa szybkie zapytania), żeby był w wiadomości.
     const tl = t.socials && t.socials.telegram;
-    if (tl && cfg.telegram.token && tgLinkKind(tl).s === 'public' && tgStale(tl, now)) await tgCheck(t, now);
+    if (!muted && tl && cfg.telegram.token && tgLinkKind(tl).s === 'public' && tgStale(tl, now)) await tgCheck(t, now);
     t.tg = tgState(t);
     const th = cache.tgHist && cache.tgHist.get(t.key);
     if (th && th.length) t.tgMembers = th[th.length - 1].c;
-    const res = await deliver(early ? tg.earlyAlert(t) : tg.tokenAlert(t));
-    if (!res.sent && telegramReady()) {
+    const res = muted ? { sent: false, error: null } : await deliver(early ? tg.earlyAlert(t) : tg.tokenAlert(t));
+    if (!muted && !res.sent && telegramReady()) {
       // Telegram jest połączony, ale wiadomość nie doszła (sieć, limit) – nie zapisujemy alertu,
       // żeby przerwa 6 h go nie „zjadła”. Spróbujemy w następnym skanie.
       log(`Nie wysłano alertu ${t.symbol}: ${res.error} – ponowię w następnym skanie`);
@@ -381,7 +390,7 @@ async function tokenAlerts(tokens, now, kind) {
     const score = early ? t.e.score : t.s.score;
     const entry = pushAlert({
       at: now, type: 'token', kind, key: t.key, chain: t.chain, address: t.address, symbol: t.symbol, name: t.name,
-      score, risk: t.s.risk, url: t.url, sent: res.sent, error: res.error,
+      score, risk: t.s.risk, url: t.url, sent: res.sent, error: res.error, ...(muted ? { muted: 1 } : {}),
       price0: t.priceUsd, liq0: t.liquidityUsd, mc0: t.marketCap || t.fdv || null, peak: t.priceUsd, low: t.priceUsd, checks: {},
       pair: t.pairAddress || null, tg: (t.socials && t.socials.telegram) || null,
     });
@@ -393,8 +402,9 @@ async function tokenAlerts(tokens, now, kind) {
       log('Nie mogę zapisać alertu w dzienniku: ' + e.message);
     }
     writeDetail(entry);
-    log(`${early ? 'Wczesny sygnał' : 'Alert'}: ${t.symbol} (${t.chain}), wynik ${Math.round(score)}${res.sent ? ' – wysłano na Telegram' : ' – ' + res.error}`);
-    n++;
+    log(`${early ? 'Wczesny sygnał' : 'Alert'}: ${t.symbol} (${t.chain}), wynik ${Math.round(score)}${muted ? ' – wyciszony (Solana, tylko zapis)' : res.sent ? ' – wysłano na Telegram' : ' – ' + res.error}`);
+    if (muted) nm++;
+    else n++;
   }
   return n;
 }
@@ -887,6 +897,7 @@ function publicConfig(forSite) {
     opensea: { ownKey: !!(cfg.opensea && cfg.opensea.apiKey) },
     auth: { enabled: !!cfg.auth.passwordHash },
     publish: { enabled: !!(cfg.publish.enabled && cfg.publish.repo), intervalSec: cfg.publish.intervalSec, site: siteUrl() },
+    solana: { separate: solApart(), telegram: !!(cfg.solana && cfg.solana.telegram) },
     minScanSec: MIN_SCAN_SEC,
   };
 }
@@ -897,7 +908,11 @@ function stateJson(forSite) {
     tokens: snapshot.tokens,
     nfts: snapshot.nfts,
     topics: snapshot.topics,
-    alertsCount: { day: state.alerts.filter((a) => Date.now() - a.at < 864e5).length, total: calllog.calls.size },
+    alertsCount: {
+      day: state.alerts.filter((a) => Date.now() - a.at < 864e5 && mainScope(a.chain)).length,
+      sol: state.alerts.filter((a) => Date.now() - a.at < 864e5 && a.chain === 'solana').length,
+      total: calllog.calls.size,
+    },
     market: snapshot.market || null,
     appVersion: APP_VERSION,
     counts: snapshot.counts || null,
@@ -973,7 +988,7 @@ function helpText() {
 }
 
 function statusText() {
-  const toks = snapshot.tokens || [];
+  const toks = (snapshot.tokens || []).filter((t) => mainScope(t.chain));
   const early = toks.filter((t) => t.e && t.e.inScope).sort((a, b) => b.e.score - a.e.score).slice(0, 3);
   const hot = toks.slice(0, 3);
   const bad = [...status.values()].filter((x) => !x.ok);
@@ -985,8 +1000,12 @@ function statusText() {
   ];
   if (early.length) out.push('', '<b>Wczesne</b>', ...early.map((t) => line(t, t.e.score)));
   if (hot.length) out.push('', '<b>Gorące</b>', ...hot.map((t) => line(t, t.s.score)));
-  const today = state.alerts.filter((a) => Date.now() - a.at < 24 * 3.6e6).length;
+  const today = state.alerts.filter((a) => Date.now() - a.at < 24 * 3.6e6 && mainScope(a.chain)).length;
   out.push('', `Alertów w 24 h: ${today}`);
+  if (solApart()) {
+    const sol = state.alerts.filter((a) => Date.now() - a.at < 24 * 3.6e6 && a.chain === 'solana').length;
+    out.push(`Solana (osobno${solMuted('solana') ? ', bez powiadomień' : ''}): ${sol} alertów w 24 h – /wyniki solana`);
+  }
   if (cfg.publish.enabled && lastPublish) out.push(`Strona zaktualizowana ${clockPl(lastPublish)}` + (siteUrl() ? `: ${siteUrl()}` : ''));
   return out.join('\n');
 }
@@ -1020,10 +1039,14 @@ function setCommand(arg) {
 // /wyniki [24h|7d|30d|all] – skuteczność z dziennika alertów.
 function resultsText(arg) {
   const map = { '24h': 'd1', '1d': 'd1', d1: 'd1', '7d': 'd7', '7': 'd7', d7: 'd7', '30d': 'd30', '30': 'd30', d30: 'd30', all: 'all', wszystko: 'all', calosc: 'all' };
-  const key = map[plain(arg || '').replace(/\s+/g, '')] || 'd7';
-  const H = calllog.summary();
+  const words = plain(arg || '').split(/\s+/).filter(Boolean);
+  const sol = words.includes('solana') || words.includes('sol');
+  const key = words.map((w) => map[w]).find(Boolean) || 'd7';
+  // Solana osobno: /wyniki – bez Solany, /wyniki solana – tylko Solana.
+  const only = sol ? (c) => c.chain === 'solana' : solApart() ? (c) => c.chain !== 'solana' : null;
+  const H = calllog.summary(Date.now(), only);
   const P = H[key];
-  const label = H.periods.find((x) => x.key === key).label;
+  const label = H.periods.find((x) => x.key === key).label + (sol ? ', tylko Solana' : solApart() ? ', bez Solany' : '');
   const pc = (x) => (x == null ? '–' : (x > 0 ? '+' : '') + x + '%');
   const line = (name, st) => {
     if (!st.n) return `<b>${name}</b>: brak alertów`;
@@ -1035,7 +1058,7 @@ function resultsText(arg) {
   const bk = P.buckets.early.filter((b) => b.h24.n);
   if (bk.length) out.push('', '<b>Wczesne wg wyniku (po 24 h)</b>', ...bk.map((b) => `${b.label}: ${b.h24.up}% na plusie, mediana ${pc(b.h24.median)} (${b.h24.n})`));
   const closed = P.all.h24.n;
-  out.push('', closed < 30 ? `Zamkniętych po 24 h: ${closed} – poniżej ~30 wynik niewiele mówi.` : `Zamkniętych po 24 h: ${closed}.`, 'Inne okresy: /wyniki 24h | 7d | 30d | all');
+  out.push('', closed < 30 ? `Zamkniętych po 24 h: ${closed} – poniżej ~30 wynik niewiele mówi.` : `Zamkniętych po 24 h: ${closed}.`, 'Inne okresy: /wyniki 24h | 7d | 30d | all' + (solApart() ? '; Solana: /wyniki solana 7d' : ''));
   return out.join('\n');
 }
 
