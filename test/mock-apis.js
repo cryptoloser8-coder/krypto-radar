@@ -92,6 +92,12 @@ const routes = [
     ],
   })],
   // Unikalni kupujący: dane tylko dla puli EARLY; dla pozostałych pusta lista.
+  // Świece godzinowe dla pomiaru 72 h (alert sprzed 72 h 5 min): szczyt 0,0000246, dołek 0,000003;
+  // ostatnia świeca jest już po końcu okna i nie może się liczyć.
+  [/^\/gt\/networks\/solana\/pools\/POOLOLD\/ohlcv\/hour$/, () => {
+    const n = Date.now() / 1000;
+    return { data: { attributes: { ohlcv_list: [[n - 60, 1, 0.009, 0.0000001, 1, 1], [n - 40 * 3600, 1, 0.0000246, 0.000005, 1, 1], [n - 70 * 3600, 1, 0.00001, 0.000003, 1, 1]] } } };
+  }],
   [/^\/gt\/networks\/([^/]+)\/pools\/multi\/(.+)$/, (m) => ({
     data: m[1] === 'base' && decodeURIComponent(m[2]).toLowerCase().split(',').includes('0xpoolearly')
       ? [{ id: 'base_0xpoolearly', type: 'pool', attributes: { address: '0xpoolearly', locked_liquidity_percentage: '100.0', transactions: { m5: { buys: 8, sells: 4, buyers: 7, sellers: 3 }, h1: { buys: 90, sells: 50, buyers: 70, sellers: 30 } } }, relationships: {} }]
