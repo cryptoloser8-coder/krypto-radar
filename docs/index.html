@@ -132,6 +132,16 @@
   .alertlist li { display: grid; grid-template-columns: 120px 1fr auto; gap: 12px; padding: 9px 0; border-bottom: 1px solid var(--line); align-items: baseline; }
   .alertlist li:last-child { border-bottom: 0; }
   .alertlist .t { color: var(--muted); font: 500 14px var(--fig); }
+  .ovsec { font: 600 15px/1.2 var(--ui); margin: 0 0 8px; }
+  .ovctl { display: grid; gap: 6px; margin-bottom: 12px; }
+  .ovctl .filters { margin: 0; gap: 6px 8px; }
+  .ovlbl { min-width: 110px; color: var(--muted); font-size: 13px; }
+  .filters input[type=number] { background: var(--surface); border: 1px solid var(--line); border-radius: 6px; padding: 5px 8px; }
+  .ovgrid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 10px; }
+  .ovcard { text-align: left; background: var(--surface); color: var(--ink); border: 1px solid transparent; border-radius: 10px; padding: 12px 14px; cursor: pointer; font: 500 14px/1.55 var(--ui); }
+  .ovcard[aria-pressed="true"] { border-color: var(--ink); }
+  .ovcard .ovh { font: 600 17px/1.2 var(--fig); }
+  .ovcard .ovn { color: var(--muted); font-size: 12.5px; margin-bottom: 4px; }
   .foot { color: var(--muted); font-size: 13px; margin-top: 22px; max-width: 80ch; }
   @media (max-width: 700px) {
     .page { padding: 14px 12px 40px; }
