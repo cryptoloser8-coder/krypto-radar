@@ -347,12 +347,35 @@ const solMuted = (chain) => chain === 'solana' && !(cfg.solana && cfg.solana.tel
 const solApart = () => !cfg.solana || cfg.solana.separate !== false;
 // Czy token/alert z tej sieci należy do głównego widoku (Solana osobno).
 const mainScope = (chain) => !(solApart() && chain === 'solana');
-async function deliver(html) {
+// Dokąd idą alerty: wybrana grupa (i temat) albo – bez wyboru – prywatna rozmowa z właścicielem.
+const alertTarget = () => (cfg.telegram.alertChat && cfg.telegram.alertChat.id ? cfg.telegram.alertChat : null);
+let groupWarnAt = 0;
+// opts.alert – wiadomość z alertem (do grupy, jeśli wybrana); reszta (pilnowanie, parowanie) zawsze prywatnie.
+async function deliver(html, opts = {}) {
   if (!telegramReady()) return { sent: false, error: 'Telegram niepołączony' };
+  const to = opts.alert ? alertTarget() : null;
   try {
-    await tg.send(cfg, html);
+    const r = await tg.send(cfg, html, to);
+    if (to && r && r.migrated) {
+      // Zwykła grupa zmieniła się w supergrupę i dostała nowy numer.
+      cfg.telegram.alertChat.id = r.migrated;
+      saveConfig();
+      log('Telegram: grupa dostała nowy numer (supergrupa) – zapisano');
+    }
     return { sent: true, error: null };
   } catch (e) {
+    // Grupa nie przyjmuje wiadomości (bot usunięty, brak uprawnień, zamknięty temat) – alert idzie prywatnie.
+    if (to && (e.status === 400 || e.status === 403)) {
+      const warn = Date.now() - groupWarnAt > 3.6e6;
+      try {
+        await tg.send(cfg, (warn ? `⚠️ Nie mogę pisać do grupy „${tgEsc(to.title || to.id)}”: ${tgEsc(e.message)}\nAlerty przychodzą tutaj, dopóki tego nie naprawisz (dodaj bota z prawem pisania i wyślij /tutaj w grupie).\n\n` : '') + html);
+        if (warn) groupWarnAt = Date.now();
+        log('Telegram: grupa nie przyjmuje wiadomości (' + e.message + ') – wysłano prywatnie');
+        return { sent: true, error: null };
+      } catch (e2) {
+        return { sent: false, error: e2.message };
+      }
+    }
     return { sent: false, error: e.message };
   }
 }
@@ -379,7 +402,7 @@ async function tokenAlerts(tokens, now, kind) {
     t.tg = tgState(t);
     const th = cache.tgHist && cache.tgHist.get(t.key);
     if (th && th.length) t.tgMembers = th[th.length - 1].c;
-    const res = muted ? { sent: false, error: null } : await deliver(early ? tg.earlyAlert(t) : tg.tokenAlert(t));
+    const res = muted ? { sent: false, error: null } : await deliver(early ? tg.earlyAlert(t) : tg.tokenAlert(t), { alert: true });
     if (!muted && !res.sent && telegramReady()) {
       // Telegram jest połączony, ale wiadomość nie doszła (sieć, limit) – nie zapisujemy alertu,
       // żeby przerwa 6 h go nie „zjadła”. Spróbujemy w następnym skanie.
@@ -791,7 +814,7 @@ async function scanNfts() {
           retry.add(c.slug);
           continue;
         }
-        const res = await deliver(tg.nftAlert(c));
+        const res = await deliver(tg.nftAlert(c), { alert: true });
         if (!res.sent && telegramReady()) {
           log(`Nie wysłano alertu NFT ${c.name}: ${res.error} – ponowię przy następnym skanie NFT`);
           retry.add(c.slug);
@@ -891,6 +914,7 @@ function publicConfig(forSite) {
           hasToken: !!cfg.telegram.token,
           connected: telegramReady(),
           bot: tgInfo.bot,
+          group: alertTarget() ? { title: alertTarget().title || '', topic: !!alertTarget().thread } : null,
           error: tgInfo.error,
           pairCode: cfg.telegram.token && !cfg.telegram.chatId ? cfg.telegram.pairCode || null : null,
         },
@@ -1002,6 +1026,8 @@ function statusText() {
   if (hot.length) out.push('', '<b>Gorące</b>', ...hot.map((t) => line(t, t.s.score)));
   const today = state.alerts.filter((a) => Date.now() - a.at < 24 * 3.6e6 && mainScope(a.chain)).length;
   out.push('', `Alertów w 24 h: ${today}`);
+  const at = alertTarget();
+  out.push(at ? `Alerty idą do grupy „${tgEsc(at.title || at.id)}”${at.thread ? ' (wybrany temat)' : ''}` : 'Alerty idą do prywatnej rozmowy');
   if (solApart()) {
     const sol = state.alerts.filter((a) => Date.now() - a.at < 24 * 3.6e6 && a.chain === 'solana').length;
     out.push(`Solana (osobno${solMuted('solana') ? ', bez powiadomień' : ''}): ${sol} alertów w 24 h – /wyniki solana`);
@@ -1062,18 +1088,24 @@ function resultsText(arg) {
   return out.join('\n');
 }
 
-async function exportCsv() {
+async function exportCsv(ctx) {
   const csv = calllog.csv();
   const name = `krypto-radar-alerty-${new Date().toISOString().slice(0, 10)}.csv`;
-  await tg.sendDocument(cfg, name, csv, `Historia alertów (${calllog.calls.size}). Otwórz w Excelu albo Arkuszach Google.`);
+  await tg.sendDocument(cfg, name, csv, `Historia alertów (${calllog.calls.size}). Otwórz w Excelu albo Arkuszach Google.`, ctx && ctx.type !== 'private' ? ctx : null);
   return null;
 }
 
-async function handleCommand(text) {
+// ctx – skąd przyszła komenda: { id, thread, type, title } (prywatna rozmowa albo grupa).
+async function handleCommand(text, ctx) {
   const [raw, ...rest] = text.split(/\s+/);
-  const cmd = plain(raw.slice(1).split('@')[0]);
+  const [name, to] = raw.slice(1).split('@');
+  // W grupie komenda do innego bota (np. /status@inny_bot) nie jest dla nas.
+  if (to && tgInfo.bot && to.toLowerCase() !== String(tgInfo.bot).toLowerCase()) return null;
+  const cmd = plain(name);
   const arg = rest.join(' ');
   switch (cmd) {
+    case 'tutaj':
+      return hereCommand(ctx);
     case 'start':
     case 'pomoc':
     case 'help':
@@ -1093,7 +1125,7 @@ async function handleCommand(text) {
     case 'eksport':
     case 'export':
       if (!calllog.calls.size) return 'Dziennik jest jeszcze pusty – nie było żadnego alertu.';
-      return exportCsv();
+      return exportCsv(ctx);
     case 'ustaw':
       return setCommand(arg);
     case 'pauza':
@@ -1107,6 +1139,22 @@ async function handleCommand(text) {
     default:
       return 'Nie znam tej komendy.\n\n' + helpText();
   }
+}
+
+// /tutaj w grupie: alerty idą do tej grupy (i tego tematu); w prywatnej rozmowie: z powrotem prywatnie.
+function hereCommand(ctx) {
+  if (!ctx || ctx.type === 'private') {
+    if (!alertTarget()) return 'Alerty i tak przychodzą tutaj, do prywatnej rozmowy. Żeby wysyłać je do grupy: dodaj bota do grupy i wyślij tam /tutaj (w wybranym temacie, jeśli grupa ma tematy).';
+    cfg.telegram.alertChat = null;
+    saveConfig();
+    publishDue = true;
+    return '✅ Alerty znowu przychodzą tutaj, do prywatnej rozmowy.';
+  }
+  cfg.telegram.alertChat = { id: ctx.id, thread: ctx.thread || null, title: ctx.title || '' };
+  saveConfig();
+  publishDue = true;
+  log(`Telegram: alerty do grupy „${ctx.title}”` + (ctx.thread ? ` (temat ${ctx.thread})` : ''));
+  return `✅ Od teraz alerty przychodzą tutaj${ctx.thread ? ', do tego tematu' : ''}.\nKomendy działają w tej grupie tylko z Twojego konta – innych członków bot ignoruje. Odpowiedzi na komendy przychodzą tam, gdzie je wyślesz.\nPowrót do prywatnej rozmowy: /tutaj w rozmowie z botem.`;
 }
 
 const numIn = (v, lo, hi) => (typeof v === 'number' && Number.isFinite(v) && v >= lo && v <= hi ? v : undefined);
@@ -1291,7 +1339,9 @@ const server = http.createServer(async (req, res) => {
       }
       if (url.pathname === '/api/telegram/test') {
         if (cfg.telegram.token && !cfg.telegram.chatId) await ensureTelegramChat();
-        await tg.send(cfg, '🔔 Test: Krypto Radar działa i może wysyłać alerty.');
+        // Tą samą drogą co alerty: do wybranej grupy, a gdy ona nie przyjmuje – prywatnie.
+        const r = await deliver('🔔 Test: Krypto Radar działa i może wysyłać alerty.', { alert: true });
+        if (!r.sent) throw new Error(r.error);
         return json(res, 200, { ok: true });
       }
       if (url.pathname === '/api/scan') {
@@ -1352,11 +1402,12 @@ function start() {
     setBudget('gt', cfg.gtPerMin);
     if (backfillAlerts()) for (const a of state.alerts) writeDetail(a);
     cycle();
+    if (cfg.telegram.token && !tgInfo.bot) tg.botName(cfg).then((n) => (tgInfo.bot = n)).catch(() => {});
     tgbot.startPolling({
       getCfg: () => cfg,
       state,
       onCommand: handleCommand,
-      send: (html) => tg.send(cfg, html),
+      send: (html, to) => tg.send(cfg, html, to),
       onError: (e) => log('Telegram (komendy): ' + e.message),
       markDirty: () => (stateDirty = true),
     });
