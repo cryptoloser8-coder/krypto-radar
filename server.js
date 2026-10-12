@@ -398,7 +398,7 @@ async function tokenAlerts(tokens, now, kind) {
     if (early && (eligibleBase(t) || (state.alerted[t.key] && now - state.alerted[t.key] < cool))) continue;
     // Telegram tokena sprawdzamy tuż przed alertem (jedno–dwa szybkie zapytania), żeby był w wiadomości.
     const tl = t.socials && t.socials.telegram;
-    if (!muted && tl && cfg.telegram.token && tgLinkKind(tl).s === 'public' && tgStale(tl, now)) await tgCheck(t, now);
+    if (!muted && tl && cfg.telegram.token && tgLinkKind(tl).s === 'public' && !(cache.tgInfo && cache.tgInfo.get(tl))) await tgCheck(t, now);
     t.tg = tgState(t);
     const th = cache.tgHist && cache.tgHist.get(t.key);
     if (th && th.length) t.tgMembers = th[th.length - 1].c;
@@ -491,21 +491,28 @@ async function sampleCandidates(tokens, now) {
   let tgN = 0;
   for (const t of tokens.slice(0, 30).concat(cands)) {
     const link = t.socials && t.socials.telegram;
-    if (tgN >= 3 || !link || tgLinkKind(link).s !== 'public' || !tgStale(link, now)) continue;
+    if (tgN >= 1 || !link || tgLinkKind(link).s !== 'public' || !tgStale(link, now)) continue;
     tgN++;
     await tgCheck(t, now);
   }
 }
 
 // ---- Telegram tokena: publiczny (nazwa, członkowie), prywatny, brak ------------------
-// Pamięć: publiczny sprawdzamy ponownie po 15 min (trend członków), nieistniejący po 12 h.
+// Telegram mocno ogranicza sprawdzanie kanałów po nazwie (getChat, getChatMemberCount) – po przekroczeniu
+// każe czekać nawet kilkanaście minut. Dlatego: najwyżej 1 kanał na skan i `lookupsPerHour` na godzinę,
+// publiczny ponownie po 30 min, prywatny / nieistniejący po 12 h.
 function tgStale(link, now) {
   const c = cache.tgInfo && cache.tgInfo.get(link);
-  return !c || now - c.at >= (c.v.s === 'public' ? 15 * 60e3 : 12 * 3.6e6);
+  return !c || now - c.at >= (c.v.s === 'public' ? 30 * 60e3 : 12 * 3.6e6);
+}
+function tgLookupOk(now) {
+  cache.tgLook = (cache.tgLook || []).filter((x) => now - x < 3.6e6);
+  return cache.tgLook.length < (cfg.telegram.lookupsPerHour || 20);
 }
 async function tgCheck(t, now) {
   const link = t.socials && t.socials.telegram;
-  if (!link) return null;
+  if (!link || !tgLookupOk(now)) return null;
+  cache.tgLook.push(now);
   cache.tgInfo = cache.tgInfo || new Map();
   try {
     const v = await tgChatInfo(cfg, link);
