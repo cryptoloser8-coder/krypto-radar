@@ -76,20 +76,30 @@ async function fetchRemote() {
   const R = REMOTE;
   if (R.url) return (await fetch(R.url, { cache: 'no-store' })).json();
   const raw = (ref) => `https://raw.githubusercontent.com/${R.owner}/${R.repo}/${ref}/data.json`;
+  let viaApi = null;
   try {
     const r = await fetch(`https://api.github.com/repos/${R.owner}/${R.repo}/git/ref/heads/${R.branch}`, { cache: 'no-store' });
     if (r.ok) {
       const sha = (await r.json()).object.sha;
-      if (sha === lastSha && S) return S;
-      const d = await (await fetch(raw(sha))).json();
-      lastSha = sha;
-      return d;
-    }
-    if (r.status === 404) throw new Error(`Brak danych w repozytorium ${R.owner}/${R.repo} (gałąź „${R.branch}”). Czy Orange Pi już coś wysłał?`);
+      if (sha === lastSha && S) viaApi = S;
+      else {
+        viaApi = await (await fetch(raw(sha))).json();
+        lastSha = sha;
+      }
+    } else if (r.status === 404) throw new Error(`Brak danych w repozytorium ${R.owner}/${R.repo} (gałąź „${R.branch}”). Czy Orange Pi już coś wysłał?`);
   } catch (e) {
     if (/Brak danych/.test(e.message)) throw e;
   }
-  return (await fetch(raw(R.branch) + '?t=' + Math.floor(Date.now() / 60000), { cache: 'no-store' })).json();
+  // API GitHuba ma limit 60 zapytań na godzinę z jednego adresu i bywa opóźnione – gdy dane wyglądają na stare,
+  // sprawdzamy też gałąź bezpośrednio i bierzemy nowsze.
+  if (viaApi && Date.now() - (viaApi.publishedAt || 0) < 10 * 60e3) return viaApi;
+  const b = await fetch(raw(R.branch) + '?t=' + Math.floor(Date.now() / 60000), { cache: 'no-store' }).then((r) => r.json()).catch(() => null);
+  if (b && (!viaApi || (b.publishedAt || 0) > (viaApi.publishedAt || 0))) {
+    lastSha = null; // listy alertów też z gałęzi, nie ze starego commita
+    return b;
+  }
+  if (viaApi) return viaApi;
+  throw new Error('Nie udało się pobrać danych z GitHuba');
 }
 
 // Sesja wygasła albo hasło zostało zmienione – wracamy do strony logowania.
@@ -197,7 +207,7 @@ function renderTop() {
   $('srcToggle').textContent = S.sources.length ? (bad.length ? `Źródła: ${bad.length} z ${S.sources.length} nie odpowiada` : `Źródła: wszystkie ${S.sources.length} działają`) : '';
   $('srcToggle').style.color = bad.length ? 'var(--crit)' : '';
   const ul = $('srcList');
-  ul.replaceChildren(...S.sources.map((s) => el('li', null, el('span', { class: 'dot' + (s.ok ? '' : ' bad') }), s.name, s.ok ? el('span', { class: 'mute', text: ' – ' + s.count }) : el('div', { class: 'err', text: s.error || 'błąd' }))));
+  ul.replaceChildren(...S.sources.map((s) => el('li', null, el('span', { class: 'dot' + (s.ok ? '' : ' bad') }), s.name, s.ok ? el('span', { class: 'mute', text: ' – ' + s.count + (s.error ? ' · ' + s.error : '') }) : el('div', { class: 'err', text: s.error || 'błąd' }))));
 }
 
 function renderTopics() {
@@ -776,7 +786,7 @@ async function loadAlerts() {
       ALERTS = { live, index };
     } else {
       const ref = lastSha || REMOTE.branch;
-      if (ref === alertsSha && ALERTS) return;
+      if (lastSha && ref === alertsSha && ALERTS) return; // ten sam commit – bez zmian (gałąź zawsze sprawdzamy)
       const q = lastSha ? '' : '?t=' + Math.floor(Date.now() / 60000);
       const [live, index] = await Promise.all(['alerts-live.json', 'alerts-index.json'].map((f) => fetch(rawUrl(ref, f) + q).then((r) => (r.ok ? r.json() : null))));
       if (!live || !index) return;
