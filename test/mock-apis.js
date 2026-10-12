@@ -58,6 +58,7 @@ const updates = [
 ];
 let failSends = 0;
 let tgCalls = 0;
+let gt429 = 0; // tyle następnych zapytań o trendy GeckoTerminal dostaje 429
 // Liczba posiadaczy rośnie z każdym zapytaniem – żeby test widział przyrost przed alertem.
 const holderAsks = new Map();
 const holderCount = (addr) => {
@@ -82,7 +83,7 @@ const routes = [
     const want = new Set(decodeURIComponent(m[2]).split(',').map((x) => x.toLowerCase()));
     return PAIRS[chain].filter((p) => want.has(p.baseToken.address.toLowerCase()));
   }],
-  [/^\/gt\/networks\/trending_pools$/, (m, q) => (q.get('duration') === '5m' ? {
+  [/^\/gt\/networks\/trending_pools$/, (m, q) => (gt429 > 0 && gt429-- ? { __status: 429, status: { error_code: 429, error_message: "You've exceeded the Rate Limit." } } : q.get('duration') === '5m' ? {
     data: [{ id: 'base_0xpoolearly', type: 'pool', attributes: { address: '0xpoolearly', name: 'EARLY / WETH', base_token_price_usd: '0.0000123', fdv_usd: '400000', market_cap_usd: '400000', reserve_in_usd: '60000', pool_created_at: new Date(NOW - 5 * H).toISOString(), price_change_percentage: { m5: '1', h1: '4', h6: '10', h24: '12' }, transactions: { m5: { buys: 8, sells: 4 }, h1: { buys: 90, sells: 50, buyers: 70, sellers: 30 }, h6: { buys: 270, sells: 150 }, h24: { buys: 540, sells: 300 } }, volume_usd: { m5: '1500', h1: '12000', h6: '18000', h24: '18000' } },
       relationships: { base_token: { data: { id: 'base_' + EARLY, type: 'token' } }, network: { data: { id: 'base', type: 'network' } }, dex: { data: { id: 'aerodrome', type: 'dex' } } } }],
     included: [{ id: 'base_' + EARLY, type: 'token', attributes: { address: EARLY, name: 'EARLY Token', symbol: 'EARLY', coingecko_coin_id: null, image_url: null } }],
@@ -197,6 +198,7 @@ const routes = [
   }],
   [/^\/__sent$/, () => sent],
   [/^\/__docs$/, () => docs],
+  [/^\/__gt429$/, (m, q) => ((gt429 = +q.get('n') || 0), { ok: true })],
   [/^\/__failsends$/, (m, q) => ((failSends = +q.get('n') || 0), { ok: true })],
 ];
 
