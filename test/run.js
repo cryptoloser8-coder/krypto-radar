@@ -147,7 +147,7 @@ async function integration() {
   const bare = path.join(dir, 'remote.git');
   execFileSync('git', ['init', '-q', '--bare', bare]);
   fs.writeFileSync(path.join(dir, 'config.json'), JSON.stringify({
-    port: APP, scanIntervalSec: 20, nftIntervalSec: 1, gtPerMin: 100,
+    port: APP, scanIntervalSec: 20, nftIntervalSec: 1, gtPerMin: 100, gtTrendEverySec: 0,
     publish: { enabled: true, repo: bare, branch: 'data', intervalSec: 60 },
     telegram: { token: '123456789:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA', chatId: '', pairCode: '123456' },
     api: { dexscreener: base + '/ds', geckoterminal: base + '/gt', coingecko: base + '/cg', pumpfun: base + '/pf', opensea: base + '/os', rugcheck: base + '/rc', goplus: base + '/gp', telegram: base + '/tg' },
@@ -311,16 +311,26 @@ async function integration() {
     const r3 = await fetch(`http://127.0.0.1:${APP}/api/config`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ alerts: { minScore: 75 } }) }).then((r) => r.json());
     assert.strictEqual(r3.config.alerts.minScore, 75);
 
+    // Chwilowy limit GeckoTerminal (429): trendy z ostatniej listy, źródło bez czerwonego błędu.
+    await fetch(base + '/__gt429?n=100');
     // Drugi skan: brak powtórnego alertu (przerwa 6 h).
     await fetch(`http://127.0.0.1:${APP}/api/scan`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' });
     await sleep(4000);
     const sent2 = await fetch(base + '/__sent').then((r) => r.json());
     assert.strictEqual(sent2.filter((m) => m.text.startsWith('🚨')).length, 0);
     assert.strictEqual(sent2.filter((m) => m.text.startsWith('🌱')).length, 1);
+    let tr = null;
+    for (let i = 0; i < 40 && !(tr && tr.error); i++) {
+      await sleep(500);
+      if (i % 6 === 5) await fetch(`http://127.0.0.1:${APP}/api/scan`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' });
+      tr = (await fetchJson(`http://127.0.0.1:${APP}/api/state`)).sources.find((x) => x.name === 'GeckoTerminal – trendujące pule');
+    }
+    assert.ok(tr.ok && /limit zapytań – lista sprzed \d+ min/.test(tr.error), JSON.stringify(tr));
+    await fetch(base + '/__gt429?n=0');
     // Publikacja: data.json na gałęzi „data”, jeden commit bez historii, bez żadnych sekretów.
     const gitR = (...a) => execFileSync('git', ['--git-dir', bare, ...a]).toString();
     const pub = JSON.parse(gitR('show', 'data:data.json'));
-    assert.ok(pub.tokens.length >= 5 && pub.publishedAt > 0 && pub.config.alerts && pub.alertsCount);
+    assert.ok(pub.tokens.length >= 5 && pub.publishedAt > 0 && pub.config.alerts && pub.alertsCount,);
     const pubTxt = JSON.stringify(pub);
     for (const secret of ['AAAAAAAAAAAA', 'kryptoradar_test_bot', '424242', 'pairCode', 'scrypt$']) assert.ok(!pubTxt.includes(secret), 'na GitHub trafiło: ' + secret);
     assert.strictEqual(gitR('rev-list', '--count', 'data').trim(), '1');
@@ -613,7 +623,21 @@ async function access() {
   const srv429 = require('http').createServer((q, r) => { srv429.hits = (srv429.hits || 0) + 1; r.writeHead(429, { 'retry-after': '120' }); r.end('slow down'); });
   await new Promise((r) => srv429.listen(9915, '127.0.0.1', r));
   await sources.fetchJson('http://127.0.0.1:9915/a').catch((e) => assert.strictEqual(e.status, 429));
-  await sources.fetchJson('http://127.0.0.1:9915/b').catch((e) => assert.ok(e.status === 429 && e.backoff));
+  await sources.fetchJson('http://127.0.0.1:9915/a?b=1').catch((e) => assert.ok(e.status === 429 && e.backoff));
+  // Telegram: 429 z czasem w treści (retry_after) blokuje tylko tę metodę – alerty i komendy dalej wychodzą.
+  const srvTg = require('http').createServer((q, r) => {
+    srvTg.hits = (srvTg.hits || 0) + 1;
+    if (/getChat$/.test(q.url.split('?')[0])) { r.writeHead(429, { 'content-type': 'application/json' }); return r.end(JSON.stringify({ ok: false, error_code: 429, description: 'Too Many Requests: retry after 700', parameters: { retry_after: 700 } })); }
+    r.writeHead(200, { 'content-type': 'application/json' }); r.end('{"ok":true,"result":[]}');
+  });
+  await new Promise((r) => srvTg.listen(9916, '127.0.0.1', r));
+  await sources.fetchJson('http://127.0.0.1:9916/tg/botT/getChat?chat_id=@x').catch((e) => assert.strictEqual(e.status, 429));
+  const blockedTg = await sources.fetchJson('http://127.0.0.1:9916/tg/botT/getChat?chat_id=@y').catch((e) => e);
+  assert.ok(blockedTg.backoff && /jeszcze (69\d|700) s/.test(blockedTg.message), blockedTg.message);
+  assert.ok((await sources.fetchJson('http://127.0.0.1:9916/tg/botT/sendMessage', { method: 'POST', body: '{}' })).ok, 'wysyłka nie może czekać na getChat');
+  assert.ok((await sources.fetchJson('http://127.0.0.1:9916/tg/botT/getUpdates')).ok);
+  assert.strictEqual(srvTg.hits, 3);
+  srvTg.close();
   assert.strictEqual(srv429.hits, 1);
   srv429.close();
 
@@ -660,7 +684,7 @@ async function access() {
     const page = await req('/', { headers: jar });
     assert.strictEqual(page.status, 200);
     assert.ok(/script-src 'self'/.test(page.headers.get('content-security-policy')) && page.headers.get('x-frame-options') === 'DENY');
-    assert.ok(/<script src="app.js\?v=\d+">/.test(await page.text()));
+    assert.ok(/<script src="app.js\?v=[\d.]+">/.test(await page.text()));
     assert.strictEqual((await req('/app.js', { headers: jar })).status, 200);
     assert.strictEqual((await req('/app.js')).status, 401, 'skrypt panelu też tylko po zalogowaniu');
     assert.strictEqual((await req('/api/state', { headers: { cookie: jar.cookie.slice(0, -3) + 'abc' } })).status, 401);
