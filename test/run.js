@@ -7,7 +7,7 @@ const os = require('os');
 const path = require('path');
 const { spawn, execFileSync } = require('child_process');
 const mock = require('./mock-apis');
-const { scoreToken, scoreEarly, scoreNft } = require('../lib/score');
+const { scoreToken, scoreEarly, scoreNft, lateGate, isTokenizedStock } = require('../lib/score');
 const outcomes = require('../lib/outcomes');
 const { CallLog } = require('../lib/calllog');
 const auth = require('../lib/auth');
@@ -31,16 +31,24 @@ function unit() {
   near(s.parts.vol, 19.3);   // 20·log2(3)/2 + 8·log2(1.6)/log2(3)
   near(s.parts.act, 16.7);   // 12·log10(1001)/log10(2000) + 8·(log10(150001)−3)/3
   near(s.parts.buy, 12);     // 15·(0.65−0.45)/0.25
-  near(s.parts.price, 15.7); // 8 + 4.5 + 3.2
-  near(s.parts.attn, 8);     // 4 + 2 + 1 + 1
-  near(s.momentum, 71.7, 0.2);
-  assert.strictEqual(s.penalty, 0);
-  assert.strictEqual(s.risk, 'none');
+  near(s.parts.price, 20);   // 1 h +24%, 6 h +45%, 24 h +80% – wszystko w „zdrowym” zakresie trapezu: 10 + 6 + 4
+  near(s.parts.attn, 6);     // 4 (trendy) + 1 + 1 – boost nie daje już punktów
+  near(s.momentum, 74, 0.2);
+  assert.strictEqual(s.penalty, 12); // „new” (10 h) i „boost” to teraz ostrzeżenia: 2 × 6
+  assert.strictEqual(s.risk, 'med');
+  assert.ok(['new', 'boost'].every((c) => s.flags.some((f) => f.code === c && f.sev === 'warn')));
+
+  // Rajd ceny nie podbija wyniku: przy +100% w 1 h, +200% w 6 h i +400% w 24 h punktów za cenę prawie nie ma.
+  const pumped = scoreToken(Object.assign({}, t, { chg: { h1: 100, h6: 200, h24: 400 } }), now);
+  near(pumped.parts.price, 0);
+  assert.ok(pumped.flags.some((f) => f.code === 'pumped'), 'próg „pumped” to teraz +150% w 24 h');
+  near(scoreToken(Object.assign({}, t, { chg: { h1: 55, h6: 45, h24: 80 } }), now).parts.price, 15); // 1 h +55%: 10·(80−55)/50 = 5
 
   // Token młodszy niż godzina nie dostaje punktów za „przyspieszenie”.
   const young = scoreToken(Object.assign({}, t, { createdAt: now - 0.5 * 3.6e6, vol: { m5: 0, h1: 40000, h6: 40000, h24: 40000 } }), now);
   assert.strictEqual(young.parts.vol, 0);
-  assert.ok(young.flags.some((f) => f.code === 'young'));
+  assert.ok(young.flags.some((f) => f.code === 'young' && f.sev === 'crit'));
+  assert.strictEqual(young.risk, 'crit'); // token młodszy niż godzina blokuje alert
 
   const rug = scoreToken(Object.assign({}, t, { liquidityUsd: 3000 }), now);
   assert.strictEqual(rug.risk, 'crit');
@@ -95,7 +103,21 @@ function unit() {
   // Boty: 200 zakupów z 20 portfeli.
   const bots = scoreToken(Object.assign({}, t, { txns: { h1: { buys: 200, sells: 50 }, h24: { buys: 900, sells: 300 } }, uniq: { h1: { buyers: 20, sellers: 15 } } }), now);
   assert.ok(bots.flags.some((f) => f.code === 'bots'));
-  console.log('✓ punktacja: obliczenia zgodne z ręcznym wyliczeniem (gorące, wczesne, NFT)');
+
+  // Bramka „za późno” dla gorących: po pompie albo ze słabym wynikiem wczesnym – odrzucony (z powodem).
+  assert.strictEqual(lateGate({ chg: { h1: 20, h24: 80 }, e: { score: 60 } }), null);
+  assert.strictEqual(lateGate({ chg: { h1: 51, h24: 80 }, e: { score: 60 } }), 'za późno: +51% w 1 h');
+  assert.strictEqual(lateGate({ chg: { h1: 20, h24: 250 }, e: { score: 60 } }), 'za późno: +250% w 24 h');
+  assert.strictEqual(lateGate({ chg: { h1: 20, h24: 80 }, e: { score: 40 } }), 'słaby wynik wczesny (40 < 45)');
+  assert.strictEqual(lateGate({ chg: { h1: 20 }, e: null }), 'słaby wynik wczesny (– < 45)');
+  assert.strictEqual(lateGate({ chg: { h1: 90 }, e: { score: 10 } }, { enabled: false }), null);
+  assert.strictEqual(lateGate({ chg: { h1: 60 }, e: { score: 60 } }, { maxChgH1: 70 }), null);
+  // Tokenizowane akcje.
+  assert.strictEqual(isTokenizedStock({ symbol: 'AAPLc', name: 'Apple Inc.', address: '0xb200000000000000000000C2e324d24d7eEcd1fb' }), true);
+  assert.strictEqual(isTokenizedStock({ symbol: 'NVDAx', name: 'NVIDIA Corporation', address: 'So1' }), true);
+  assert.strictEqual(isTokenizedStock({ symbol: 'HUMEc', name: 'Hume', address: '0x12' }), false);
+  assert.strictEqual(isTokenizedStock({ symbol: 'GRASS', name: 'Grass Inc.', address: '0x12' }), false);
+  console.log('✓ punktacja: obliczenia zgodne z ręcznym wyliczeniem (gorące, wczesne, NFT, bramka „za późno”, akcje)');
 
   // --- Pomiar skuteczności z przesuwanym zegarem ---
   const T0 = 1e12, HOUR = 3.6e6;
@@ -192,8 +214,8 @@ async function integration() {
     assert.strictEqual(by.GOOD.dataFrom, 'dexscreener');
     assert.ok(by.GOOD.sources.includes('gt-trending') && by.GOOD.sources.includes('ds-boost-top') && by.GOOD.sources.includes('pump-active') && by.GOOD.sources.includes('pump-migrated'));
     assert.strictEqual(by.GOOD.security, 'checked');
-    assert.strictEqual(by.GOOD.s.risk, 'none');
-    near(by.GOOD.s.momentum, 72.7, 0.3); // 71.7 z testu jednostkowego + 1 pkt za „aktywne na pump.fun”
+    assert.strictEqual(by.GOOD.s.risk, 'med'); // ostrzeżenia „new” (10 h) i „boost”
+    near(by.GOOD.s.momentum, 75, 0.3); // 74 z testu jednostkowego + 1 pkt za „aktywne na pump.fun”
     assert.strictEqual(st.tokens[0].symbol, 'GOOD');
 
     // HONEY: świetne liczby, ale GoPlus zgłasza honeypot → ryzyko krytyczne, brak alertu.
@@ -403,6 +425,26 @@ async function integration() {
     }
     assert.ok(ws.length && /24 h, tylko Solana/.test(ws[0].text) && /Gorące<\/b> – 1 alertów/.test(ws[0].text), ws[0] && ws[0].text);
 
+    // Bramka „za późno”, pomijanie akcji i przełączniki Solany z Telegrama; /wyniki odrzucone.
+    const nSent4 = (await fetch(base + '/__sent').then((r) => r.json())).length;
+    for (const c of ['/ustaw bramka_1h 30', '/ustaw bramka_wczesny 55', '/ustaw bramka wył.', '/ustaw akcje wył', '/ustaw solana_tg wł.', '/ustaw solana_osobno wył.', '/wyniki odrzucone 7d']) await tgSay(424242, c);
+    let w4 = [];
+    for (let i = 0; i < 60 && w4.length < 7; i++) {
+      await sleep(250);
+      w4 = (await fetch(base + '/__sent').then((r) => r.json())).slice(nSent4);
+    }
+    assert.ok(w4.length === 7 && w4.slice(0, 6).every((m) => /^✅/.test(m.text)), JSON.stringify(w4.map((m) => m.text.slice(0, 60))));
+    assert.ok(/odrzucone przez bramkę/.test(w4[6].text), w4[6].text);
+    const cfgG = JSON.parse(fs.readFileSync(path.join(dir, 'config.json'), 'utf8'));
+    assert.deepStrictEqual([cfgG.alerts.gate.maxChgH1, cfgG.alerts.gate.minEarlyScore, cfgG.alerts.gate.enabled, cfgG.alerts.gate.maxChgH24, cfgG.alerts.excludeStocks], [30, 55, false, 200, false]);
+    assert.deepStrictEqual(cfgG.solana, { separate: false, telegram: true });
+    for (const c of ['/ustaw bramka wł', '/ustaw akcje wł', '/ustaw solana_tg wył', '/ustaw solana_osobno wł']) await tgSay(424242, c);
+    for (let i = 0; i < 60; i++) {
+      const c = JSON.parse(fs.readFileSync(path.join(dir, 'config.json'), 'utf8'));
+      if (c.alerts.gate.enabled && c.alerts.excludeStocks && !c.solana.telegram && c.solana.separate) break;
+      await sleep(250);
+    }
+
     // Alerty do grupy: /tutaj w temacie grupy (tylko z konta właściciela), komendy obcych i do innych botów pomijane.
     const tgPush = (o) => fetch(`${base}/__tgpush?` + new URLSearchParams(o));
     const waitSent = async (from, n = 1) => {
@@ -529,7 +571,21 @@ function callLogUnit() {
   assert.ok(lines.find((l) => l.startsWith('c;')).includes(';pominięty;'));
   const colsB = lines.find((l) => l.startsWith('b;')).replace('"N;""x"""', 'Q').split(';');
   assert.deepStrictEqual([colsB[head.indexOf('zniknął')], colsB[head.indexOf('wykres')]], ['tak', 'https://x/b'], 'zniknięty token oznaczony');
-  console.log('✓ dziennik alertów: zapis, wyniki, statystyki według okresu, wyniku i sieci, eksport CSV');
+
+  // Alerty odrzucone przez bramkę „za późno”: osobno w statystykach, z powodem w indeksie i CSV.
+  const dirR = fs.mkdtempSync(path.join(os.tmpdir(), 'radar-rej-'));
+  const R = new CallLog(dirR);
+  R.append({ t: 'call', id: 'ok', at: t0, type: 'token', kind: 'momentum', symbol: 'OK', chain: 'base', score: 60, price: 1, sent: true });
+  R.append({ t: 'call', id: 'late', at: t0, type: 'token', kind: 'momentum', symbol: 'LATE', chain: 'base', score: 70, price: 1, sent: false, rej: 'za późno: +80% w 1 h' });
+  R.append({ t: 'check', id: 'late', at: t0 + 3.6e6, name: 'h1', chg: -40, p: 0.6 });
+  const SR = R.summary(t0 + 864e5), SJ = R.summary(t0 + 864e5, null, true);
+  assert.deepStrictEqual([SR.total, SR.d7.kinds.momentum.n, SJ.total, SJ.d7.kinds.momentum.h1.median], [1, 1, 1, -40], 'odrzucone nie psują statystyk prawdziwych alertów');
+  const ir = R.index(t0 + 864e5, 30);
+  assert.deepStrictEqual([ir.find((r) => r.id === 'late').rj, ir.find((r) => r.id === 'ok').rj], ['za późno: +80% w 1 h', undefined]);
+  const csvR = R.csv().split('\r\n');
+  const hR = csvR[0].replace(/^\uFEFF/, '').split(';');
+  assert.strictEqual(csvR.find((l) => l.startsWith('late;')).split(';')[hR.indexOf('odrzucony (powód)')], 'za późno: +80% w 1 h');
+  console.log('✓ dziennik alertów: zapis, wyniki, statystyki według okresu, wyniku i sieci, eksport CSV, odrzucone osobno');
 }
 
 // ---- Dane dodatkowe: transakcje, insiderzy, GoPlus, taśma, pilnowanie, kopia ----
