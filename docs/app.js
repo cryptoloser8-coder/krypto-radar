@@ -1,7 +1,7 @@
 'use strict';
 const $ = (id) => document.getElementById(id);
 // Musi się zgadzać z APP_VERSION w server.js – inaczej strona prosi o odświeżenie albo aktualizację Orange Pi.
-const APP_VERSION = 11;
+const APP_VERSION = 12;
 function el(tag, attrs, ...kids) {
   const n = document.createElement(tag);
   for (const k in attrs || {}) {
@@ -436,7 +436,7 @@ const WIN_MS = { h1: 3.6e6, h24: 864e5, h72: 3 * 864e5, d7: 7 * 864e5 };
 function alertRows() {
   const byId = new Map();
   for (const r of (ALERTS && ALERTS.index && ALERTS.index.rows) || []) {
-    byId.set(r.id, { id: r.id, at: r.at, type: r.t === 'n' ? 'nft' : 'token', kind: r.t === 'e' ? 'early' : 'momentum', symbol: r.s, chain: r.c, score: r.sc, risk: r.r, price0: r.p0, sent: !!r.se, muted: !!r.mu, x: r.x || {} });
+    byId.set(r.id, { id: r.id, at: r.at, type: r.t === 'n' ? 'nft' : 'token', kind: r.t === 'e' ? 'early' : 'momentum', symbol: r.s, chain: r.c, score: r.sc, risk: r.r, price0: r.p0, sent: !!r.se, muted: !!r.mu, rej: r.rj || null, x: r.x || {} });
   }
   for (const a of (ALERTS && ALERTS.live && ALERTS.live.alerts) || []) {
     const x = {};
@@ -444,7 +444,7 @@ function alertRows() {
       const c = a.checks && a.checks[w];
       if (c) x[w] = c.missed ? ['m'] : [c.chg, c.pk ?? null, c.lo ?? null, c.dead ? 'd' : c.rug ? 'r' : c.approx ? 'a' : ''];
     }
-    byId.set(a.id || a.at + a.symbol, Object.assign({}, byId.get(a.id) || {}, { id: a.id, at: a.at, type: a.type, kind: a.kind || 'momentum', symbol: a.symbol, chain: a.chain, score: a.score, risk: a.risk, price0: a.price0, sent: a.sent, muted: !!a.muted, error: a.error, x, live: a }));
+    byId.set(a.id || a.at + a.symbol, Object.assign({}, byId.get(a.id) || {}, { id: a.id, at: a.at, type: a.type, kind: a.kind || 'momentum', symbol: a.symbol, chain: a.chain, score: a.score, risk: a.risk, price0: a.price0, sent: a.sent, muted: !!a.muted, rej: a.rej || null, error: a.error, x, live: a }));
   }
   return [...byId.values()].sort((a, b) => b.at - a.at);
 }
@@ -477,12 +477,12 @@ function alertTable(rows, mode) {
     body.push(el('tr', { class: 'row r-' + (r.risk || 'none'), tabindex: '0', 'aria-expanded': String(open), onclick: toggle, onkeydown: (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggle(); } } },
       el('td', { class: 'l', text: when(r.at) }),
       el('td', { class: 'l', style: 'font-family:var(--ui)' }, el('b', { text: r.symbol }), r.chain ? el('span', { class: 'chain', text: r.chain }) : null),
-      el('td', { class: 'l', style: 'font-family:var(--ui)', text: r.type === 'nft' ? 'NFT' : KIND[r.kind] }),
+      el('td', { class: 'l', style: 'font-family:var(--ui)', text: r.type === 'nft' ? 'NFT' : KIND[r.kind] + (r.rej ? ' (odrzucony)' : '') }),
       el('td', { text: r.score == null ? '–' : Math.round(r.score) }),
       el('td', { text: r.type === 'nft' ? '–' : price(r.price0) }),
       WINS.map(([w]) => el('td', null, winCell(r, w, mode))),
       el('td', null, peak24 != null && r.type !== 'nft' ? pct(peak24) : el('span', { class: 'mute', text: '–' })),
-      el('td', { class: 'l', style: 'font-family:var(--ui);font-size:13px' }, el('span', { class: r.sent ? 'up' : 'mute', text: r.sent ? 'wysłano' : r.muted ? 'wyciszony' : r.error || 'nie wysłano', title: r.muted ? 'Solana bez powiadomień – alert tylko zapisany i mierzony' : '' }))));
+      el('td', { class: 'l', style: 'font-family:var(--ui);font-size:13px' }, el('span', { class: r.sent ? 'up' : 'mute', text: r.sent ? 'wysłano' : r.rej ? 'odrzucony' : r.muted ? 'wyciszony' : r.error || 'nie wysłano', title: r.rej ? 'Bramka „za późno”: ' + r.rej + ' – alert tylko zapisany i mierzony' : r.muted ? 'Solana bez powiadomień – alert tylko zapisany i mierzony' : '' }))));
     if (open) body.push(el('tr', { class: 'detail' }, el('td', { colspan: '11' }, detailFor(r))));
   }
   return el('div', { class: 'tablewrap' }, el('table', null,
@@ -498,7 +498,8 @@ function renderAlerts() {
   const all = alertRows().filter((r) => (r.type === 'nft' ? !isSol() : inScope(r.chain)));
   if (isSol() && ui.alertKind === 'nft') ui.alertKind = '';
   const mode = ui.ovMode;
-  const kindOk = (r) => !ui.alertKind || (ui.alertKind === 'nft' ? r.type === 'nft' : r.type !== 'nft' && r.kind === ui.alertKind);
+  // Odrzucone przez bramkę „za późno” są widoczne tylko pod własnym filtrem – nie psują statystyk prawdziwych alertów.
+  const kindOk = (r) => (ui.alertKind === 'rejected' ? !!r.rej : !r.rej && (!ui.alertKind || (ui.alertKind === 'nft' ? r.type === 'nft' : r.type !== 'nft' && r.kind === ui.alertKind)));
   const chainCounts = new Map();
   for (const r of all.filter(kindOk)) chainCounts.set(r.chain || '–', (chainCounts.get(r.chain || '–') || 0) + 1);
   if (ui.alertChain && !chainCounts.has(ui.alertChain)) ui.alertChain = '';
@@ -556,7 +557,7 @@ function renderAlerts() {
     return [chip(cur == null, 'bez progu', () => { ui[key] = null; render(); }), ...presets.map((p) => chip(cur === p, `${sign}${p}%`, () => { ui[key] = p; render(); })), input, el('span', { class: 'mute', text: '%' })];
   };
   const controls = el('div', { class: 'ovctl' },
-    el('div', { class: 'filters' }, el('span', { class: 'ovlbl', text: 'Rodzaj' }), chip(ui.alertKind === '', 'Wszystkie', () => { ui.alertKind = ''; render(); }), chip(ui.alertKind === 'early', 'Wczesne', () => { ui.alertKind = 'early'; render(); }), chip(ui.alertKind === 'momentum', 'Gorące', () => { ui.alertKind = 'momentum'; render(); }), isSol() ? null : chip(ui.alertKind === 'nft', 'NFT', () => { ui.alertKind = 'nft'; render(); })),
+    el('div', { class: 'filters' }, el('span', { class: 'ovlbl', text: 'Rodzaj' }), chip(ui.alertKind === '', 'Wszystkie', () => { ui.alertKind = ''; render(); }), chip(ui.alertKind === 'early', 'Wczesne', () => { ui.alertKind = 'early'; render(); }), chip(ui.alertKind === 'momentum', 'Gorące', () => { ui.alertKind = 'momentum'; render(); }), isSol() ? null : chip(ui.alertKind === 'nft', 'NFT', () => { ui.alertKind = 'nft'; render(); }), chip(ui.alertKind === 'rejected', 'Odrzucone', () => { ui.alertKind = 'rejected'; render(); }, 'Gorące zatrzymane przez bramkę „za późno” (już po pompie) – bez wiadomości, tylko pomiar, żeby sprawdzić, czy bramka pomaga')),
     isSol() ? null : el('div', { class: 'filters' }, el('span', { class: 'ovlbl', text: 'Sieć' }),
       chip(!ui.alertChain, 'Wszystkie', () => { ui.alertChain = ''; render(); }),
       [...chainCounts].sort((a, b) => b[1] - a[1]).map(([c, n]) => chip(ui.alertChain === c, `${c} (${n})`, () => { ui.alertChain = c; render(); }))),
@@ -843,6 +844,11 @@ function renderSettingsReadOnly() {
     ['Gorące teraz: minimalna płynność', money(a.minLiquidityUsd), '/ustaw plynnosc 20k'],
     ['Gorące teraz: minimalny wolumen 1 h', money(a.minVolume1hUsd), '/ustaw wolumen 10k'],
     ['Tokeny na krzywej pump.fun', onoff(a.allowBondingCurve), '/ustaw krzywa on|off'],
+    ['Gorące: bramka „za późno”', onoff(!a.gate || a.gate.enabled !== false), '/ustaw bramka on|off'],
+    ['Bramka: najwyższy wzrost w 1 h', a.gate ? '+' + a.gate.maxChgH1 + '%' : '–', '/ustaw bramka_1h 50'],
+    ['Bramka: najwyższy wzrost w 24 h', a.gate ? '+' + a.gate.maxChgH24 + '%' : '–', '/ustaw bramka_24h 200'],
+    ['Bramka: najniższy wynik wczesny', a.gate ? a.gate.minEarlyScore : '–', '/ustaw bramka_wczesny 45'],
+    ['Pomijanie tokenizowanych akcji', onoff(a.excludeStocks !== false), '/ustaw akcje on|off'],
     ['Przerwa między alertami o tym samym tokenie', a.cooldownHours + ' h', '/ustaw przerwa 6'],
     ['Najwięcej alertów na skan', a.maxPerScan, '/ustaw max 3'],
     ['Tylko te sieci', (a.chains || []).length ? a.chains.join(', ') : 'wszystkie', '/ustaw sieci solana,base  albo  /ustaw sieci wszystkie'],
