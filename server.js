@@ -21,8 +21,8 @@ const { Health } = require('./lib/health');
 const { backup } = require('./lib/backup');
 
 // Wersja danych i strony – strona porównuje ją ze swoją i prosi o odświeżenie, gdy się różnią.
-const APP_VERSION = 11;
-const { scoreToken, scoreEarly, scoreNft } = require('./lib/score');
+const APP_VERSION = 12;
+const { scoreToken, scoreEarly, scoreNft, lateGate, isTokenizedStock, GATE_DEFAULTS } = require('./lib/score');
 const security = require('./lib/security');
 const tg = require('./lib/telegram');
 const outcomes = require('./lib/outcomes');
@@ -58,6 +58,10 @@ const DEFAULTS = {
     minVolume1hUsd: 10000,
     allowBondingCurve: true,
     minMarketCapUsd: 30000,
+    // Bramka „za późno” dla gorących (dane 11–14.10): po pompie albo ze słabym wynikiem wczesnym alert nie idzie
+    // na Telegram – jest tylko zapisywany i mierzony w tle jako „odrzucony”.
+    gate: Object.assign({}, GATE_DEFAULTS),
+    excludeStocks: true, // tokenizowane akcje (AAPLc, NVDAc…) – bez alertów
     chains: [],
     nft: true,
     nftMinScore: 50,
@@ -227,7 +231,7 @@ function pruneAlerts() {
 // Szczegóły jednego alertu (DATA_DIR/details/<id>.json): obraz z chwili alertu, pomiary, przebieg ceny.
 // Zapisywane przy alercie i przy każdym pomiarze; strona pobiera je dopiero po rozwinięciu alertu.
 const DETAILS_DIR = path.join(DATA_DIR, 'details');
-const ROW_KEYS = ['id', 'at', 'type', 'kind', 'symbol', 'chain', 'score', 'risk', 'url', 'sent', 'error', 'price0', 'liq0', 'mc0', 'checks', 'peak', 'peakAt', 'low', 'lowAt', 'done', 'path', 'enrich', 'muted'];
+const ROW_KEYS = ['id', 'at', 'type', 'kind', 'symbol', 'chain', 'score', 'risk', 'url', 'sent', 'error', 'price0', 'liq0', 'mc0', 'checks', 'peak', 'peakAt', 'low', 'lowAt', 'done', 'path', 'enrich', 'muted', 'rej'];
 const rowOf = (a) => {
   const o = {};
   for (const k of ROW_KEYS) if (a[k] != null) o[k] = a[k];
@@ -275,7 +279,7 @@ function tokenSnapshot(t, kind, entry, threshold) {
   const s = t.s, e = t.e;
   return {
     t: 'call', id: entry.id, at: entry.at, iso: new Date(entry.at).toISOString(), type: 'token', kind,
-    sent: entry.sent, error: entry.error || null, muted: entry.muted ? 1 : undefined,
+    sent: entry.sent, error: entry.error || null, muted: entry.muted ? 1 : undefined, rej: entry.rej || undefined,
     symbol: t.symbol, name: t.name, chain: t.chain, address: t.address, pairAddress: t.pairAddress, dexId: t.dexId,
     url: t.url, pumpUrl: t.pumpUrl || null, dataFrom: t.dataFrom,
     score: entry.score, threshold, risk: s.risk,
@@ -386,47 +390,58 @@ async function tokenAlerts(tokens, now, kind) {
   if (!cfg.alerts.enabled || (early && !cfg.early.enabled)) return 0;
   const cool = cfg.alerts.cooldownHours * 3.6e6;
   const list = early ? tokens.filter((t) => t.e && t.e.inScope).sort((a, b) => b.e.score - a.e.score) : tokens;
-  let n = 0, nm = 0; // wysłane i wyciszone (Solana) – osobne limity, żeby Solana nie zabierała miejsca innym
+  // Osobne limity na skan: wysłane, wyciszone (Solana) i odrzucone przez bramkę – żeby jedne nie zabierały miejsca innym.
+  const max = cfg.alerts.maxPerScan;
+  let n = 0, nm = 0, nr = 0;
   for (const t of list) {
-    if (n >= cfg.alerts.maxPerScan && nm >= cfg.alerts.maxPerScan) break;
-    const muted = solMuted(t.chain);
-    if ((muted ? nm : n) >= cfg.alerts.maxPerScan) continue;
+    if (n >= max && nm >= max && nr >= max) break;
+    if (cfg.alerts.excludeStocks !== false && isTokenizedStock(t)) continue;
     if (!(early ? eligibleEarly(t) : eligible(t))) continue;
     const mark = (early ? 'e:' : '') + t.key;
     if (state.alerted[mark] && now - state.alerted[mark] < cool) continue;
     // Token, który jest już „gorący” albo dostał taki alert, nie jest wczesnym sygnałem.
     if (early && (eligibleBase(t) || (state.alerted[t.key] && now - state.alerted[t.key] < cool))) continue;
+    // Bramka „za późno”: token już po pompie – zapis i pomiar w tle, bez wiadomości.
+    // Osobna przerwa (r:), żeby odrzucenie nie blokowało prawdziwego alertu, gdy token się uspokoi.
+    const rej = early ? null : lateGate(t, cfg.alerts.gate);
+    if (rej && state.alerted['r:' + t.key] && now - state.alerted['r:' + t.key] < cool) continue;
+    const muted = !rej && solMuted(t.chain);
+    if ((rej ? nr : muted ? nm : n) >= max) continue;
     // Telegram tokena sprawdzamy tuż przed alertem (jedno–dwa szybkie zapytania), żeby był w wiadomości.
     const tl = t.socials && t.socials.telegram;
-    if (!muted && tl && cfg.telegram.token && tgLinkKind(tl).s === 'public' && !(cache.tgInfo && cache.tgInfo.get(tl))) await tgCheck(t, now);
+    if (!muted && !rej && tl && cfg.telegram.token && tgLinkKind(tl).s === 'public' && !(cache.tgInfo && cache.tgInfo.get(tl))) await tgCheck(t, now);
     t.tg = tgState(t);
     const th = cache.tgHist && cache.tgHist.get(t.key);
     if (th && th.length) t.tgMembers = th[th.length - 1].c;
-    const res = muted ? { sent: false, error: null } : await deliver(early ? tg.earlyAlert(t) : tg.tokenAlert(t), { alert: true });
-    if (!muted && !res.sent && telegramReady()) {
+    const res = muted || rej ? { sent: false, error: null } : await deliver(early ? tg.earlyAlert(t) : tg.tokenAlert(t), { alert: true });
+    if (!muted && !rej && !res.sent && telegramReady()) {
       // Telegram jest połączony, ale wiadomość nie doszła (sieć, limit) – nie zapisujemy alertu,
       // żeby przerwa 6 h go nie „zjadła”. Spróbujemy w następnym skanie.
       log(`Nie wysłano alertu ${t.symbol}: ${res.error} – ponowię w następnym skanie`);
       break;
     }
-    state.alerted[mark] = now;
+    state.alerted[rej ? 'r:' + t.key : mark] = now;
     const score = early ? t.e.score : t.s.score;
     const entry = pushAlert({
       at: now, type: 'token', kind, key: t.key, chain: t.chain, address: t.address, symbol: t.symbol, name: t.name,
-      score, risk: t.s.risk, url: t.url, sent: res.sent, error: res.error, ...(muted ? { muted: 1 } : {}),
+      score, risk: t.s.risk, url: t.url, sent: res.sent, error: res.error, ...(muted ? { muted: 1 } : {}), ...(rej ? { rej } : {}),
       price0: t.priceUsd, liq0: t.liquidityUsd, mc0: t.marketCap || t.fdv || null, peak: t.priceUsd, low: t.priceUsd, checks: {},
       pair: t.pairAddress || null, tg: (t.socials && t.socials.telegram) || null,
     });
-    t.alerted = early ? 'e' : 'm';
-    (state.enrich = state.enrich || []).push({ id: entry.id, tag: 'alert', at: now, chain: t.chain, address: t.address, pair: t.pairAddress || null, tg: entry.tg });
+    if (!rej) {
+      t.alerted = early ? 'e' : 'm';
+      // Dane dodatkowe (posiadacze, transakcje, insiderzy) tylko dla prawdziwych alertów – oszczędzamy limity API.
+      (state.enrich = state.enrich || []).push({ id: entry.id, tag: 'alert', at: now, chain: t.chain, address: t.address, pair: t.pairAddress || null, tg: entry.tg });
+    }
     try {
       calllog.append(tokenSnapshot(t, kind, entry, early ? cfg.early.minScore : cfg.alerts.minScore));
     } catch (e) {
       log('Nie mogę zapisać alertu w dzienniku: ' + e.message);
     }
     writeDetail(entry);
-    log(`${early ? 'Wczesny sygnał' : 'Alert'}: ${t.symbol} (${t.chain}), wynik ${Math.round(score)}${muted ? ' – wyciszony (Solana, tylko zapis)' : res.sent ? ' – wysłano na Telegram' : ' – ' + res.error}`);
-    if (muted) nm++;
+    log(`${early ? 'Wczesny sygnał' : 'Alert'}: ${t.symbol} (${t.chain}), wynik ${Math.round(score)}${rej ? ` – odrzucony (${rej}), tylko zapis` : muted ? ' – wyciszony (Solana, tylko zapis)' : res.sent ? ' – wysłano na Telegram' : ' – ' + res.error}`);
+    if (rej) nr++;
+    else if (muted) nm++;
     else n++;
   }
   return n;
@@ -712,7 +727,7 @@ async function scanTokens() {
     for (const name of Object.keys(a.checks || {})) {
       if (b.keys.includes(name)) continue;
       changed = true;
-      if (a.id && ['h1', 'h24', 'h72', 'd7'].includes(name) && !a.checks[name].missed) {
+      if (a.id && !a.rej && ['h1', 'h24', 'h72', 'd7'].includes(name) && !a.checks[name].missed) {
         (state.enrich = state.enrich || []).push({ id: a.id, tag: name, at: now, chain: a.chain, address: a.address, pair: a.pair || null, tg: a.tg || null });
       }
       if (a.id) {
@@ -940,8 +955,9 @@ function stateJson(forSite) {
     nfts: snapshot.nfts,
     topics: snapshot.topics,
     alertsCount: {
-      day: state.alerts.filter((a) => Date.now() - a.at < 864e5 && mainScope(a.chain)).length,
-      sol: state.alerts.filter((a) => Date.now() - a.at < 864e5 && a.chain === 'solana').length,
+      day: state.alerts.filter((a) => Date.now() - a.at < 864e5 && !a.rej && mainScope(a.chain)).length,
+      sol: state.alerts.filter((a) => Date.now() - a.at < 864e5 && !a.rej && a.chain === 'solana').length,
+      rej: state.alerts.filter((a) => Date.now() - a.at < 864e5 && a.rej).length,
       total: calllog.calls.size,
     },
     market: snapshot.market || null,
@@ -1031,12 +1047,13 @@ function statusText() {
   ];
   if (early.length) out.push('', '<b>Wczesne</b>', ...early.map((t) => line(t, t.e.score)));
   if (hot.length) out.push('', '<b>Gorące</b>', ...hot.map((t) => line(t, t.s.score)));
-  const today = state.alerts.filter((a) => Date.now() - a.at < 24 * 3.6e6 && mainScope(a.chain)).length;
-  out.push('', `Alertów w 24 h: ${today}`);
+  const today = state.alerts.filter((a) => Date.now() - a.at < 24 * 3.6e6 && !a.rej && mainScope(a.chain)).length;
+  const rejected = state.alerts.filter((a) => Date.now() - a.at < 24 * 3.6e6 && a.rej).length;
+  out.push('', `Alertów w 24 h: ${today}` + (rejected ? ` (odrzuconych przez bramkę „za późno”: ${rejected} – /wyniki odrzucone)` : ''));
   const at = alertTarget();
   out.push(at ? `Alerty idą do grupy „${tgEsc(at.title || at.id)}”${at.thread ? ' (wybrany temat)' : ''}` : 'Alerty idą do prywatnej rozmowy');
   if (solApart()) {
-    const sol = state.alerts.filter((a) => Date.now() - a.at < 24 * 3.6e6 && a.chain === 'solana').length;
+    const sol = state.alerts.filter((a) => Date.now() - a.at < 24 * 3.6e6 && !a.rej && a.chain === 'solana').length;
     out.push(`Solana (osobno${solMuted('solana') ? ', bez powiadomień' : ''}): ${sol} alertów w 24 h – /wyniki solana`);
   }
   if (cfg.publish.enabled && lastPublish) out.push(`Strona zaktualizowana ${clockPl(lastPublish)}` + (siteUrl() ? `: ${siteUrl()}` : ''));
@@ -1074,12 +1091,14 @@ function resultsText(arg) {
   const map = { '24h': 'd1', '1d': 'd1', d1: 'd1', '7d': 'd7', '7': 'd7', d7: 'd7', '30d': 'd30', '30': 'd30', d30: 'd30', all: 'all', wszystko: 'all', calosc: 'all' };
   const words = plain(arg || '').split(/\s+/).filter(Boolean);
   const sol = words.includes('solana') || words.includes('sol');
+  const rej = words.some((w) => /^odrzuc/.test(w));
   const key = words.map((w) => map[w]).find(Boolean) || 'd7';
   // Solana osobno: /wyniki – bez Solany, /wyniki solana – tylko Solana.
-  const only = sol ? (c) => c.chain === 'solana' : solApart() ? (c) => c.chain !== 'solana' : null;
-  const H = calllog.summary(Date.now(), only);
+  // /wyniki odrzucone – alerty zatrzymane przez bramkę „za późno” (do sprawdzenia, czy bramka pomaga).
+  const only = sol ? (c) => c.chain === 'solana' : solApart() && !rej ? (c) => c.chain !== 'solana' : null;
+  const H = calllog.summary(Date.now(), only, rej);
   const P = H[key];
-  const label = H.periods.find((x) => x.key === key).label + (sol ? ', tylko Solana' : solApart() ? ', bez Solany' : '');
+  const label = H.periods.find((x) => x.key === key).label + (rej ? ', odrzucone przez bramkę' : '') + (sol ? ', tylko Solana' : solApart() && !rej ? ', bez Solany' : '');
   const pc = (x) => (x == null ? '–' : (x > 0 ? '+' : '') + x + '%');
   const line = (name, st) => {
     if (!st.n) return `<b>${name}</b>: brak alertów`;
@@ -1091,7 +1110,7 @@ function resultsText(arg) {
   const bk = P.buckets.early.filter((b) => b.h24.n);
   if (bk.length) out.push('', '<b>Wczesne wg wyniku (po 24 h)</b>', ...bk.map((b) => `${b.label}: ${b.h24.up}% na plusie, mediana ${pc(b.h24.median)} (${b.h24.n})`));
   const closed = P.all.h24.n;
-  out.push('', closed < 30 ? `Zamkniętych po 24 h: ${closed} – poniżej ~30 wynik niewiele mówi.` : `Zamkniętych po 24 h: ${closed}.`, 'Inne okresy: /wyniki 24h | 7d | 30d | all' + (solApart() ? '; Solana: /wyniki solana 7d' : ''));
+  out.push('', closed < 30 ? `Zamkniętych po 24 h: ${closed} – poniżej ~30 wynik niewiele mówi.` : `Zamkniętych po 24 h: ${closed}.`, 'Inne okresy: /wyniki 24h | 7d | 30d | all' + (solApart() ? '; Solana: /wyniki solana 7d' : '') + (rej ? '' : '; odrzucone: /wyniki odrzucone 7d'));
   return out.join('\n');
 }
 
@@ -1190,12 +1209,26 @@ function applyConfig(body) {
   set('minLiquidityUsd', numIn(a.minLiquidityUsd, 0, 1e9));
   set('minVolume1hUsd', numIn(a.minVolume1hUsd, 0, 1e9));
   set('minMarketCapUsd', numIn(a.minMarketCapUsd, 0, 1e12));
+  if (typeof a.excludeStocks === 'boolean') cfg.alerts.excludeStocks = a.excludeStocks;
+  const g = a.gate || {};
+  cfg.alerts.gate = Object.assign({}, GATE_DEFAULTS, cfg.alerts.gate || {});
+  if (typeof g.enabled === 'boolean') cfg.alerts.gate.enabled = g.enabled;
+  for (const [k, lo, hi] of [['maxChgH1', 5, 10000], ['maxChgH24', 10, 100000], ['minEarlyScore', 0, 100]]) {
+    const v = numIn(g[k], lo, hi);
+    if (v !== undefined) cfg.alerts.gate[k] = v;
+  }
   if (Array.isArray(a.chains)) cfg.alerts.chains = a.chains.filter((x) => typeof x === 'string' && /^[a-z0-9_-]{1,32}$/.test(x)).slice(0, 60);
   const e = body.early || {};
   if (typeof e.enabled === 'boolean') cfg.early.enabled = e.enabled;
   for (const [k, lo, hi] of [['minScore', 1, 100], ['minLiquidityUsd', 0, 1e9], ['minVolume1hUsd', 0, 1e9], ['minAgeMin', 0, 10080], ['maxMarketCapUsd', 1000, 1e12]]) {
     const v = numIn(e[k], lo, hi);
     if (v !== undefined) cfg.early[k] = v;
+  }
+  const so = body.solana || {};
+  if (typeof so.telegram === 'boolean' || typeof so.separate === 'boolean') {
+    cfg.solana = Object.assign({ separate: true, telegram: false }, cfg.solana || {});
+    if (typeof so.telegram === 'boolean') cfg.solana.telegram = so.telegram;
+    if (typeof so.separate === 'boolean') cfg.solana.separate = so.separate;
   }
   const si = numIn(body.scanIntervalSec, MIN_SCAN_SEC, 3600);
   if (si !== undefined) cfg.scanIntervalSec = si;
