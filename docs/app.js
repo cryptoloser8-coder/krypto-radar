@@ -1,7 +1,7 @@
 'use strict';
 const $ = (id) => document.getElementById(id);
 // Musi się zgadzać z APP_VERSION w server.js – inaczej strona prosi o odświeżenie albo aktualizację Orange Pi.
-const APP_VERSION = 12;
+const APP_VERSION = 13;
 function el(tag, attrs, ...kids) {
   const n = document.createElement(tag);
   for (const k in attrs || {}) {
@@ -436,7 +436,7 @@ const WIN_MS = { h1: 3.6e6, h24: 864e5, h72: 3 * 864e5, d7: 7 * 864e5 };
 function alertRows() {
   const byId = new Map();
   for (const r of (ALERTS && ALERTS.index && ALERTS.index.rows) || []) {
-    byId.set(r.id, { id: r.id, at: r.at, type: r.t === 'n' ? 'nft' : 'token', kind: r.t === 'e' ? 'early' : 'momentum', symbol: r.s, chain: r.c, score: r.sc, risk: r.r, price0: r.p0, sent: !!r.se, muted: !!r.mu, rej: r.rj || null, x: r.x || {} });
+    byId.set(r.id, { id: r.id, at: r.at, type: r.t === 'n' ? 'nft' : 'token', kind: r.t === 'e' ? 'early' : r.t === 'r' ? 'rh' : 'momentum', f: r.f || null, symbol: r.s, chain: r.c, score: r.sc, risk: r.r, price0: r.p0, sent: !!r.se, muted: !!r.mu, rej: r.rj || null, x: r.x || {} });
   }
   for (const a of (ALERTS && ALERTS.live && ALERTS.live.alerts) || []) {
     const x = {};
@@ -467,7 +467,7 @@ function winCell(r, w, mode) {
 
 function alertTable(rows, mode) {
   const when = (t) => new Date(t).toLocaleString('pl-PL', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' });
-  const KIND = { early: 'wczesny', momentum: 'gorący' };
+  const KIND = { early: 'wczesny', momentum: 'gorący', rh: 'nowy RH' };
   const body = [];
   for (const r of rows) {
     const key = r.id || r.at + r.symbol;
@@ -482,7 +482,7 @@ function alertTable(rows, mode) {
       el('td', { text: r.type === 'nft' ? '–' : price(r.price0) }),
       WINS.map(([w]) => el('td', null, winCell(r, w, mode))),
       el('td', null, peak24 != null && r.type !== 'nft' ? pct(peak24) : el('span', { class: 'mute', text: '–' })),
-      el('td', { class: 'l', style: 'font-family:var(--ui);font-size:13px' }, el('span', { class: r.sent ? 'up' : 'mute', text: r.sent ? 'wysłano' : r.rej ? 'odrzucony' : r.muted ? 'wyciszony' : r.error || 'nie wysłano', title: r.rej ? 'Bramka „za późno”: ' + r.rej + ' – alert tylko zapisany i mierzony' : r.muted ? 'Solana bez powiadomień – alert tylko zapisany i mierzony' : '' }))));
+      el('td', { class: 'l', style: 'font-family:var(--ui);font-size:13px' }, el('span', { class: r.sent ? 'up' : 'mute', text: r.sent ? 'wysłano' : r.rej ? 'odrzucony' : r.muted ? 'wyciszony' : r.error || 'nie wysłano', title: r.rej ? 'Bramka „za późno”: ' + r.rej + ' – alert tylko zapisany i mierzony' : r.muted ? (r.kind === 'rh' ? 'Nowe na Robinhood bez powiadomień – tylko zapis i pomiar TP/SL' : 'Solana bez powiadomień – alert tylko zapisany i mierzony') : '' }))));
     if (open) body.push(el('tr', { class: 'detail' }, el('td', { colspan: '11' }, detailFor(r))));
   }
   return el('div', { class: 'tablewrap' }, el('table', null,
@@ -499,7 +499,8 @@ function renderAlerts() {
   if (isSol() && ui.alertKind === 'nft') ui.alertKind = '';
   const mode = ui.ovMode;
   // Odrzucone przez bramkę „za późno” są widoczne tylko pod własnym filtrem – nie psują statystyk prawdziwych alertów.
-  const kindOk = (r) => (ui.alertKind === 'rejected' ? !!r.rej : !r.rej && (!ui.alertKind || (ui.alertKind === 'nft' ? r.type === 'nft' : r.type !== 'nft' && r.kind === ui.alertKind)));
+  // „Wszystkie” = gorące, wczesne i NFT; odrzucone i nowe z Robinhood mają własne filtry, żeby nie mieszać statystyk.
+  const kindOk = (r) => (ui.alertKind === 'rejected' ? !!r.rej : !r.rej && (ui.alertKind === 'rh' ? r.kind === 'rh' : r.kind !== 'rh' && (!ui.alertKind || (ui.alertKind === 'nft' ? r.type === 'nft' : r.type !== 'nft' && r.kind === ui.alertKind))));
   const chainCounts = new Map();
   for (const r of all.filter(kindOk)) chainCounts.set(r.chain || '–', (chainCounts.get(r.chain || '–') || 0) + 1);
   if (ui.alertChain && !chainCounts.has(ui.alertChain)) ui.alertChain = '';
@@ -557,7 +558,7 @@ function renderAlerts() {
     return [chip(cur == null, 'bez progu', () => { ui[key] = null; render(); }), ...presets.map((p) => chip(cur === p, `${sign}${p}%`, () => { ui[key] = p; render(); })), input, el('span', { class: 'mute', text: '%' })];
   };
   const controls = el('div', { class: 'ovctl' },
-    el('div', { class: 'filters' }, el('span', { class: 'ovlbl', text: 'Rodzaj' }), chip(ui.alertKind === '', 'Wszystkie', () => { ui.alertKind = ''; render(); }), chip(ui.alertKind === 'early', 'Wczesne', () => { ui.alertKind = 'early'; render(); }), chip(ui.alertKind === 'momentum', 'Gorące', () => { ui.alertKind = 'momentum'; render(); }), isSol() ? null : chip(ui.alertKind === 'nft', 'NFT', () => { ui.alertKind = 'nft'; render(); }), chip(ui.alertKind === 'rejected', 'Odrzucone', () => { ui.alertKind = 'rejected'; render(); }, 'Gorące zatrzymane przez bramkę „za późno” (już po pompie) – bez wiadomości, tylko pomiar, żeby sprawdzić, czy bramka pomaga')),
+    el('div', { class: 'filters' }, el('span', { class: 'ovlbl', text: 'Rodzaj' }), chip(ui.alertKind === '', 'Wszystkie', () => { ui.alertKind = ''; render(); }), chip(ui.alertKind === 'early', 'Wczesne', () => { ui.alertKind = 'early'; render(); }), chip(ui.alertKind === 'momentum', 'Gorące', () => { ui.alertKind = 'momentum'; render(); }), isSol() ? null : chip(ui.alertKind === 'nft', 'NFT', () => { ui.alertKind = 'nft'; render(); }), chip(ui.alertKind === 'rejected', 'Odrzucone', () => { ui.alertKind = 'rejected'; render(); }, 'Gorące zatrzymane przez bramkę „za późno” (już po pompie) – bez wiadomości, tylko pomiar, żeby sprawdzić, czy bramka pomaga'), isSol() ? null : chip(ui.alertKind === 'rh', 'Nowe Robinhood', () => { ui.alertKind = 'rh'; render(); }, 'Tokeny na Robinhood widziane pierwszy raz, młodsze niż 30 min – z dokładnym pomiarem TP/SL')),
     isSol() ? null : el('div', { class: 'filters' }, el('span', { class: 'ovlbl', text: 'Sieć' }),
       chip(!ui.alertChain, 'Wszystkie', () => { ui.alertChain = ''; render(); }),
       [...chainCounts].sort((a, b) => b[1] - a[1]).map(([c, n]) => chip(ui.alertChain === c, `${c} (${n})`, () => { ui.alertChain = c; render(); }))),
@@ -667,6 +668,25 @@ function alertDetail(a) {
       res('h1', 'Po 1 h'), res('h6', 'Po 6 h'), res('h24', 'Po 24 h'), res('h72', 'Po 72 h'), res('d7', 'Po 7 dniach'),
       li('Szczyt w 24 h', peakPct == null ? '–' : pct(peakPct), a.peakAt && a.peakAt > a.at ? ` po ${ago(a.peakAt)}` : ''),
       li('Dołek w 24 h', lowPct == null ? '–' : pct(lowPct), a.lowAt && a.lowAt > a.at ? ` po ${ago(a.lowAt)}` : '')));
+  // Dokładny pomiar TP/SL (wersja 13): pierwsze przekroczenie progów w ciągu 6 h od wejścia po ~5 min.
+  const f = a.fp;
+  const hit = (o, th, sign) => (o && o[th] ? el('span', null, `po ${o[th][0]} min `, el('span', { class: 'mute', text: `(${pctTxt(o[th][1])})` })) : el('span', { class: 'mute', text: f && f.done ? 'nie' : 'jeszcze nie' }));
+  const fpRes = (tp, sl) => {
+    if (!f || f.none || !(f.e > 0)) return null;
+    const h = f.hi && f.hi[tp], l = f.lo && f.lo[sl];
+    if (h && (!l || h[0] < l[0])) return tp;
+    if (l) return l[1];
+    return f.done ? f.end : null;
+  };
+  const strat = (tp, sl) => { const v = fpRes(tp, sl); return li(`TP +${tp}% / SL −${sl}%`, v == null ? el('span', { class: 'mute', text: 'trwa' }) : pct(v)); };
+  const fpBlock = !f ? null : f.none ? el('div', null, el('h3', { text: 'TP/SL' }), el('p', { class: 'mute', text: 'Brak pomiaru – nie było ceny w chwili wejścia.' }))
+    : el('div', null, el('h3', { text: f.done ? 'TP/SL (6 h od wejścia, zakończony)' : 'TP/SL (pomiar trwa, 6 h od wejścia)' }), el('ul', null,
+      li('Wejście', `po ${f.et} min – ${price(f.e)}`),
+      ...[50, 100, 200].map((th) => li(`Pierwsze +${th}%`, hit(f.hi, th))),
+      ...[30, 40, 50].map((th) => li(`Pierwsze −${th}%`, hit(f.lo, th))),
+      f.done ? li('Po 6 h od wejścia', pct(f.end)) : null,
+      strat(100, 40), strat(200, 50), strat(50, 30),
+      el('li', { class: 'mute', style: 'font-size:12px', text: 'Wyniki bez kosztów (opłaty, poślizg ~2–4%).' })));
   const u = d.uniq;
   const atAlert = el('div', null, el('h3', { text: 'Stan w chwili alertu' }), el('ul', null,
     li('Cena', price(a.price0)), li('Płynność', usd(d.liq ?? a.liq0)), li('Wycena', usd(d.mc ?? a.mc0)),
@@ -689,7 +709,7 @@ function alertDetail(a) {
     el('div', { class: 'links' }, link(a.url, 'Wykres'), link(d.pumpUrl, 'pump.fun')),
     d.address ? el('div', { class: 'addr', style: 'margin-top:8px', text: d.address }) : null,
     d.address ? el('button', { class: 'linkbtn', style: 'font-size:13px', text: 'Kopiuj adres', onclick: (e) => { e.stopPropagation(); navigator.clipboard.writeText(d.address).then(() => { e.target.textContent = 'Skopiowano'; }); } }) : null);
-  return el('div', null, el('div', { class: 'dgrid' }, results, why, atAlert, links), extraDetail(a));
+  return el('div', null, el('div', { class: 'dgrid' }, results, fpBlock, why, atAlert, links), extraDetail(a));
 }
 
 // Dane dodatkowe przy alercie: rynek, posiadacze, insiderzy i twórca, transakcje, Telegram, realne wejście.
@@ -849,6 +869,12 @@ function renderSettingsReadOnly() {
     ['Bramka: najwyższy wzrost w 24 h', a.gate ? '+' + a.gate.maxChgH24 + '%' : '–', '/ustaw bramka_24h 200'],
     ['Bramka: najniższy wynik wczesny', a.gate ? a.gate.minEarlyScore : '–', '/ustaw bramka_wczesny 45'],
     ['Pomijanie tokenizowanych akcji', onoff(a.excludeStocks !== false), '/ustaw akcje on|off'],
+    ...(S.config.robinhood ? [
+      ['Nowe na Robinhood (zapis i pomiar TP/SL)', onoff(S.config.robinhood.enabled), '/ustaw rh on|off'],
+      ['Nowe na Robinhood: wiadomości na Telegram', onoff(S.config.robinhood.telegram), '/ustaw rh_tg on|off'],
+      ['Nowe na Robinhood: najstarszy token', S.config.robinhood.maxAgeMin + ' min', '/ustaw rh_wiek 30'],
+      ['Nowe na Robinhood: płynność', money(S.config.robinhood.minLiquidityUsd) + ' – ' + money(S.config.robinhood.maxLiquidityUsd), '/ustaw rh_plynnosc_min 20k  ·  /ustaw rh_plynnosc_max 200k'],
+    ] : []),
     ['Przerwa między alertami o tym samym tokenie', a.cooldownHours + ' h', '/ustaw przerwa 6'],
     ['Najwięcej alertów na skan', a.maxPerScan, '/ustaw max 3'],
     ['Tylko te sieci', (a.chains || []).length ? a.chains.join(', ') : 'wszystkie', '/ustaw sieci solana,base  albo  /ustaw sieci wszystkie'],
