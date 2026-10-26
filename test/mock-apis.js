@@ -24,6 +24,7 @@ function pair(o) {
 }
 
 const GOOD = 'GoodMint1111111111111111111111111111111pump';
+const NEWRH = '0x7777000000000000000000000000000000007777'; // nowy token na Robinhood (15 min, płynność 50 tys. $)
 const CURVE = 'CurveMint111111111111111111111111111111pump';
 const RUG = '0x1111111111111111111111111111111111111111';
 const HONEY = '0x2222222222222222222222222222222222222222';
@@ -93,10 +94,13 @@ const routes = [
         relationships: { base_token: { data: { id: 'solana_' + GOOD, type: 'token' } }, network: { data: { id: 'solana', type: 'network' } }, dex: { data: { id: 'pumpswap', type: 'dex' } } } },
       { id: 'robinhood_0xpool', type: 'pool', attributes: { address: '0xpool', name: 'ROO / WETH', base_token_price_usd: '0.000133', fdv_usd: '134329.79', market_cap_usd: '134329.79', reserve_in_usd: '23029.54', pool_created_at: new Date(NOW - 300 * H).toISOString(), price_change_percentage: { m5: '-1.4', h1: '-12.2', h6: '-7.1', h24: '-17.8' }, transactions: { m5: { buys: 37, sells: 37 }, h1: { buys: 498, sells: 513 }, h6: { buys: 2259, sells: 2136 }, h24: { buys: 9982, sells: 9415 } }, volume_usd: { m5: '1444.4', h1: '20516.8', h6: '97193.1', h24: '494884.4' } },
         relationships: { base_token: { data: { id: 'robinhood_0x3458e003f6ed93df0f537b8acac6fbe08e41247f', type: 'token' } }, network: { data: { id: 'robinhood', type: 'network' } }, dex: { data: { id: 'uniswap-v4-robinhood', type: 'dex' } } } },
+      { id: 'robinhood_0xpoolnew', type: 'pool', attributes: { address: '0xpoolnew', name: 'NEWRH / WETH', base_token_price_usd: '0.0021', fdv_usd: '210000', market_cap_usd: '210000', reserve_in_usd: '50000', pool_created_at: new Date(NOW - 15 * 60e3).toISOString(), price_change_percentage: { m5: '12', h1: '140', h6: '140', h24: '140' }, transactions: { m5: { buys: 60, sells: 30 }, h1: { buys: 300, sells: 140 }, h6: { buys: 300, sells: 140 }, h24: { buys: 300, sells: 140 } }, volume_usd: { m5: '9000', h1: '60000', h6: '60000', h24: '60000' } },
+        relationships: { base_token: { data: { id: 'robinhood_' + NEWRH, type: 'token' } }, network: { data: { id: 'robinhood', type: 'network' } }, dex: { data: { id: 'uniswap-v4-robinhood', type: 'dex' } } } },
     ],
     included: [
       { id: 'solana_' + GOOD, type: 'token', attributes: { address: GOOD, name: 'GOOD Token', symbol: 'GOOD', coingecko_coin_id: null, image_url: 'https://example.com/g.png' } },
       { id: 'robinhood_0x3458e003f6ed93df0f537b8acac6fbe08e41247f', type: 'token', attributes: { address: '0x3458e003f6ed93df0f537b8acac6fbe08e41247f', name: 'Roo', symbol: 'ROO', coingecko_coin_id: 'roo', image_url: 'https://example.com/r.png' } },
+      { id: 'robinhood_' + NEWRH, type: 'token', attributes: { address: NEWRH, name: 'New Robin', symbol: 'NEWRH', coingecko_coin_id: null, image_url: null } },
     ],
   })],
   // Unikalni kupujący: dane tylko dla puli EARLY; dla pozostałych pusta lista.
@@ -224,5 +228,5 @@ function start(port) {
   return new Promise((r) => server.listen(port, '127.0.0.1', () => r(server)));
 }
 
-module.exports = { start, GOOD, CURVE, RUG, HONEY, DUMP, EARLY };
+module.exports = { start, GOOD, CURVE, RUG, HONEY, DUMP, EARLY, NEWRH };
 if (require.main === module) start(+process.argv[2] || 9911).then(() => console.log('mock on', +process.argv[2] || 9911));
