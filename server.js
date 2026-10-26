@@ -21,8 +21,8 @@ const { Health } = require('./lib/health');
 const { backup } = require('./lib/backup');
 
 // Wersja danych i strony – strona porównuje ją ze swoją i prosi o odświeżenie, gdy się różnią.
-const APP_VERSION = 12;
-const { scoreToken, scoreEarly, scoreNft, lateGate, isTokenizedStock, GATE_DEFAULTS } = require('./lib/score');
+const APP_VERSION = 13;
+const { scoreToken, scoreEarly, scoreNft, lateGate, isTokenizedStock, rhNewWhy, GATE_DEFAULTS, RH_DEFAULTS } = require('./lib/score');
 const security = require('./lib/security');
 const tg = require('./lib/telegram');
 const outcomes = require('./lib/outcomes');
@@ -89,6 +89,9 @@ const DEFAULTS = {
   backup: { enabled: true, dir: '', keep: 14, hour: 4 },
   // Solana: osobna zakładka na stronie i alerty bez powiadomień na Telegram (zapisywane i mierzone w tle).
   solana: { separate: true, telegram: false },
+  // Nowe tokeny na Robinhood (wersja 13): pierwsze pojawienie, wiek ≤ 30 min, płynność 20–200 tys. $.
+  // Domyślnie tylko zapis i dokładny pomiar TP/SL w tle – bez wiadomości (/ustaw rh_tg wł. je włącza).
+  robinhood: Object.assign({}, RH_DEFAULTS),
 };
 
 function merge(base, over) {
@@ -231,7 +234,7 @@ function pruneAlerts() {
 // Szczegóły jednego alertu (DATA_DIR/details/<id>.json): obraz z chwili alertu, pomiary, przebieg ceny.
 // Zapisywane przy alercie i przy każdym pomiarze; strona pobiera je dopiero po rozwinięciu alertu.
 const DETAILS_DIR = path.join(DATA_DIR, 'details');
-const ROW_KEYS = ['id', 'at', 'type', 'kind', 'symbol', 'chain', 'score', 'risk', 'url', 'sent', 'error', 'price0', 'liq0', 'mc0', 'checks', 'peak', 'peakAt', 'low', 'lowAt', 'done', 'path', 'enrich', 'muted', 'rej'];
+const ROW_KEYS = ['id', 'at', 'type', 'kind', 'symbol', 'chain', 'score', 'risk', 'url', 'sent', 'error', 'price0', 'liq0', 'mc0', 'checks', 'peak', 'peakAt', 'low', 'lowAt', 'done', 'path', 'enrich', 'muted', 'rej', 'fp'];
 const rowOf = (a) => {
   const o = {};
   for (const k of ROW_KEYS) if (a[k] != null) o[k] = a[k];
@@ -443,6 +446,39 @@ async function tokenAlerts(tokens, now, kind) {
     if (rej) nr++;
     else if (muted) nm++;
     else n++;
+  }
+  return n;
+}
+
+// Nowe tokeny na Robinhood: jeden zapis na token, przy pierwszym pojawieniu się na listach.
+// Domyślnie bez wiadomości (tylko pomiar w tle, „wyciszony”), bez dociągania danych dodatkowych – oszczędzamy limity API.
+async function rhAlerts(tokens, now) {
+  const R = Object.assign({}, RH_DEFAULTS, cfg.robinhood || {});
+  if (!R.enabled) return 0;
+  let n = 0;
+  for (const t of tokens) {
+    if (n >= R.maxPerScan) break;
+    const mark = 'n:' + t.key;
+    if (state.alerted[mark]) continue;
+    if (rhNewWhy(t, now, R)) continue;
+    state.alerted[mark] = now;
+    const muted = !(R.telegram && cfg.alerts.enabled);
+    const res = muted ? { sent: false, error: null } : await deliver(tg.rhAlert(t), { alert: true });
+    const entry = pushAlert({
+      at: now, type: 'token', kind: 'rh', key: t.key, chain: t.chain, address: t.address, symbol: t.symbol, name: t.name,
+      score: t.s.score, risk: t.s.risk, url: t.url, sent: res.sent, error: res.error, ...(muted ? { muted: 1 } : {}),
+      price0: t.priceUsd, liq0: t.liquidityUsd, mc0: t.marketCap || t.fdv || null, peak: t.priceUsd, low: t.priceUsd, checks: {},
+      pair: t.pairAddress || null, tg: (t.socials && t.socials.telegram) || null,
+    });
+    t.alerted = 'r';
+    try {
+      calllog.append(tokenSnapshot(t, 'rh', entry, null));
+    } catch (e) {
+      log('Nie mogę zapisać alertu w dzienniku: ' + e.message);
+    }
+    writeDetail(entry);
+    log(`Nowy Robinhood: ${t.symbol}, wiek ${Math.round((t.s.parts.ageH || 0) * 60)} min, płynność $${Math.round(t.liquidityUsd || 0)}${muted ? ' – tylko zapis i pomiar TP/SL w tle' : res.sent ? ' – wysłano na Telegram' : ' – ' + res.error}`);
+    n++;
   }
   return n;
 }
@@ -718,7 +754,7 @@ async function scanTokens() {
   }
 
   // Pomiar wyników: każdy nowy wynik (1 h, 6 h, 24 h, 72 h, 7 dni) trafia do dziennika i do pliku szczegółów.
-  const prev = new Map(state.alerts.map((a) => [a, { keys: Object.keys(a.checks || {}), done: !!a.done }]));
+  const prev = new Map(state.alerts.map((a) => [a, { keys: Object.keys(a.checks || {}), done: !!a.done, fp: !!(a.fp && a.fp.done), glitches: a.glitches || 0 }]));
   outcomes.track(state.alerts, all, asked, now);
   for (const a of state.alerts) {
     const b = prev.get(a);
@@ -737,6 +773,15 @@ async function scanTokens() {
         logSafe(Object.assign({}, c, extra, { t: 'check', id: a.id, at: now, name, ct: c.t }));
       }
     }
+    // Dokładny pomiar TP/SL zakończony (6 h od wejścia) – do dziennika.
+    if (a.fp && a.fp.done && !b.fp) {
+      changed = true;
+      if (a.id) logSafe(Object.assign({ t: 'fp', id: a.id, at: now }, a.fp));
+    }
+    if ((a.glitches || 0) > b.glitches) {
+      stateDirty = true;
+      if (b.glitches === 0) log(`Pomiar ${a.symbol} (${a.chain}): pominięto podejrzany odczyt ceny (skok ponad 10×, możliwa zła para)`);
+    }
     if (a.done && !b.done) {
       changed = true;
       if (a.id) logSafe({ t: 'done', id: a.id, at: now });
@@ -748,6 +793,7 @@ async function scanTokens() {
   }
   const sentEarly = await tokenAlerts(tokens, now, 'early');
   const sent = await tokenAlerts(tokens, now, 'momentum');
+  const sentRh = await rhAlerts(tokens, now);
   await processEnrich(now);
 
   // Taśma: stan wszystkich ocenianych tokenów co kilka minut.
@@ -806,7 +852,8 @@ async function scanTokens() {
       (topE ? `, wczesny lider ${topE.symbol} (${Math.round(topE.e.score)})` : '') +
       (top ? `, gorący lider ${top.symbol} (${Math.round(top.s.score)})` : '') +
       (sentEarly ? `, wczesne sygnały: ${sentEarly}` : '') +
-      (sent ? `, alerty: ${sent}` : '')
+      (sent ? `, alerty: ${sent}` : '') +
+      (sentRh ? `, nowe Robinhood: ${sentRh}` : '')
   );
 }
 
@@ -944,6 +991,7 @@ function publicConfig(forSite) {
     auth: { enabled: !!cfg.auth.passwordHash },
     publish: { enabled: !!(cfg.publish.enabled && cfg.publish.repo), intervalSec: cfg.publish.intervalSec, site: siteUrl() },
     solana: { separate: solApart(), telegram: !!(cfg.solana && cfg.solana.telegram) },
+    robinhood: Object.assign({}, RH_DEFAULTS, cfg.robinhood || {}),
     minScanSec: MIN_SCAN_SEC,
   };
 }
@@ -955,7 +1003,8 @@ function stateJson(forSite) {
     nfts: snapshot.nfts,
     topics: snapshot.topics,
     alertsCount: {
-      day: state.alerts.filter((a) => Date.now() - a.at < 864e5 && !a.rej && mainScope(a.chain)).length,
+      day: state.alerts.filter((a) => Date.now() - a.at < 864e5 && !a.rej && a.kind !== 'rh' && mainScope(a.chain)).length,
+      rh: state.alerts.filter((a) => Date.now() - a.at < 864e5 && a.kind === 'rh').length,
       sol: state.alerts.filter((a) => Date.now() - a.at < 864e5 && !a.rej && a.chain === 'solana').length,
       rej: state.alerts.filter((a) => Date.now() - a.at < 864e5 && a.rej).length,
       total: calllog.calls.size,
@@ -1047,7 +1096,7 @@ function statusText() {
   ];
   if (early.length) out.push('', '<b>Wczesne</b>', ...early.map((t) => line(t, t.e.score)));
   if (hot.length) out.push('', '<b>Gorące</b>', ...hot.map((t) => line(t, t.s.score)));
-  const today = state.alerts.filter((a) => Date.now() - a.at < 24 * 3.6e6 && !a.rej && mainScope(a.chain)).length;
+  const today = state.alerts.filter((a) => Date.now() - a.at < 24 * 3.6e6 && !a.rej && a.kind !== 'rh' && mainScope(a.chain)).length;
   const rejected = state.alerts.filter((a) => Date.now() - a.at < 24 * 3.6e6 && a.rej).length;
   out.push('', `Alertów w 24 h: ${today}` + (rejected ? ` (odrzuconych przez bramkę „za późno”: ${rejected} – /wyniki odrzucone)` : ''));
   const at = alertTarget();
@@ -1055,6 +1104,11 @@ function statusText() {
   if (solApart()) {
     const sol = state.alerts.filter((a) => Date.now() - a.at < 24 * 3.6e6 && !a.rej && a.chain === 'solana').length;
     out.push(`Solana (osobno${solMuted('solana') ? ', bez powiadomień' : ''}): ${sol} alertów w 24 h – /wyniki solana`);
+  }
+  const R = Object.assign({}, RH_DEFAULTS, cfg.robinhood || {});
+  if (R.enabled) {
+    const rh = state.alerts.filter((a) => Date.now() - a.at < 24 * 3.6e6 && a.kind === 'rh').length;
+    out.push(`Nowe na Robinhood (${R.telegram ? 'z powiadomieniami' : 'tylko pomiar w tle'}): ${rh} w 24 h – /wyniki robinhood`);
   }
   if (cfg.publish.enabled && lastPublish) out.push(`Strona zaktualizowana ${clockPl(lastPublish)}` + (siteUrl() ? `: ${siteUrl()}` : ''));
   return out.join('\n');
@@ -1092,10 +1146,14 @@ function resultsText(arg) {
   const words = plain(arg || '').split(/\s+/).filter(Boolean);
   const sol = words.includes('solana') || words.includes('sol');
   const rej = words.some((w) => /^odrzuc/.test(w));
+  const rh = words.some((w) => /^(robinhood|rh|nowe)$/.test(w));
+  if (rh) return rhResultsText(words.map((w) => map[w]).find(Boolean) || 'd7');
   const key = words.map((w) => map[w]).find(Boolean) || 'd7';
   // Solana osobno: /wyniki – bez Solany, /wyniki solana – tylko Solana.
   // /wyniki odrzucone – alerty zatrzymane przez bramkę „za późno” (do sprawdzenia, czy bramka pomaga).
-  const only = sol ? (c) => c.chain === 'solana' : solApart() && !rej ? (c) => c.chain !== 'solana' : null;
+  // Nowe tokeny na Robinhood mają własne wyniki (/wyniki robinhood) – nie mieszamy ich z gorącymi.
+  const base = sol ? (c) => c.chain === 'solana' : solApart() && !rej ? (c) => c.chain !== 'solana' : () => true;
+  const only = (c) => c.kind !== 'rh' && base(c);
   const H = calllog.summary(Date.now(), only, rej);
   const P = H[key];
   const label = H.periods.find((x) => x.key === key).label + (rej ? ', odrzucone przez bramkę' : '') + (sol ? ', tylko Solana' : solApart() && !rej ? ', bez Solany' : '');
@@ -1111,6 +1169,28 @@ function resultsText(arg) {
   if (bk.length) out.push('', '<b>Wczesne wg wyniku (po 24 h)</b>', ...bk.map((b) => `${b.label}: ${b.h24.up}% na plusie, mediana ${pc(b.h24.median)} (${b.h24.n})`));
   const closed = P.all.h24.n;
   out.push('', closed < 30 ? `Zamkniętych po 24 h: ${closed} – poniżej ~30 wynik niewiele mówi.` : `Zamkniętych po 24 h: ${closed}.`, 'Inne okresy: /wyniki 24h | 7d | 30d | all' + (solApart() ? '; Solana: /wyniki solana 7d' : '') + (rej ? '' : '; odrzucone: /wyniki odrzucone 7d'));
+  return out.join('\n');
+}
+
+// /wyniki robinhood [24h|7d|30d|all] – nowe tokeny na Robinhood i strategie TP/SL z dokładnego pomiaru.
+function rhResultsText(key) {
+  const H = calllog.summary(Date.now(), (c) => c.kind === 'rh');
+  const P = H[key], st = P.kinds.rh;
+  const label = H.periods.find((x) => x.key === key).label;
+  const pc = (x) => (x == null ? '–' : (x > 0 ? '+' : '') + x + '%');
+  const out = [`🆕 <b>Nowe na Robinhood – ${label}</b>`, `Zapisanych: ${st.n}`];
+  const NAMES = { tp100: 'TP +100% / SL −40%', tp200: 'TP +200% / SL −50%', tp50: 'TP +50% / SL −30%' };
+  out.push('', '<b>Strategie (wejście po 5 min, najpóźniej 6 h, bez kosztów)</b>');
+  for (const [k, l] of Object.entries(NAMES)) {
+    const f = st.fp[k];
+    out.push(f.n ? `${l}: średnio ${pc(f.avg)}, mediana ${pc(f.median)}, na plusie ${f.up}%, trafione TP ${f.tp}% (${f.n})` : `${l}: jeszcze brak zakończonych`);
+  }
+  out.push('', 'Koszty (opłaty, poślizg) to zwykle 2–4% na transakcję – odejmij je od średniej.');
+  if (st.h1.n) out.push(`Po 1 h: ${st.h1.up}% na plusie, mediana ${pc(st.h1.median)} (${st.h1.n})`);
+  if (st.h24.n) out.push(`Po 24 h: ${st.h24.up}% na plusie, mediana ${pc(st.h24.median)} (${st.h24.n})`);
+  if (st.dead) out.push(`Zniknęło lub wycofana płynność: ${st.dead}`);
+  const done = st.fp.tp100.n;
+  out.push('', done < 50 ? `Zakończonych pomiarów TP/SL: ${done} – poniżej ~50 wynik niewiele mówi.` : `Zakończonych pomiarów TP/SL: ${done}.`, 'Inne okresy: /wyniki robinhood 24h | 7d | 30d | all');
   return out.join('\n');
 }
 
@@ -1223,6 +1303,14 @@ function applyConfig(body) {
   for (const [k, lo, hi] of [['minScore', 1, 100], ['minLiquidityUsd', 0, 1e9], ['minVolume1hUsd', 0, 1e9], ['minAgeMin', 0, 10080], ['maxMarketCapUsd', 1000, 1e12]]) {
     const v = numIn(e[k], lo, hi);
     if (v !== undefined) cfg.early[k] = v;
+  }
+  const rb = body.robinhood || {};
+  cfg.robinhood = Object.assign({}, RH_DEFAULTS, cfg.robinhood || {});
+  if (typeof rb.enabled === 'boolean') cfg.robinhood.enabled = rb.enabled;
+  if (typeof rb.telegram === 'boolean') cfg.robinhood.telegram = rb.telegram;
+  for (const [k, lo, hi] of [['maxAgeMin', 1, 1440], ['minLiquidityUsd', 0, 1e9], ['maxLiquidityUsd', 1000, 1e12], ['maxSeenMin', 1, 120]]) {
+    const v = numIn(rb[k], lo, hi);
+    if (v !== undefined) cfg.robinhood[k] = v;
   }
   const so = body.solana || {};
   if (typeof so.telegram === 'boolean' || typeof so.separate === 'boolean') {
