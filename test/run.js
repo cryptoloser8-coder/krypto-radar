@@ -7,7 +7,7 @@ const os = require('os');
 const path = require('path');
 const { spawn, execFileSync } = require('child_process');
 const mock = require('./mock-apis');
-const { scoreToken, scoreEarly, scoreNft, lateGate, isTokenizedStock } = require('../lib/score');
+const { scoreToken, scoreEarly, scoreNft, lateGate, isTokenizedStock, rhNewWhy } = require('../lib/score');
 const outcomes = require('../lib/outcomes');
 const { CallLog } = require('../lib/calllog');
 const auth = require('../lib/auth');
@@ -117,7 +117,17 @@ function unit() {
   assert.strictEqual(isTokenizedStock({ symbol: 'NVDAx', name: 'NVIDIA Corporation', address: 'So1' }), true);
   assert.strictEqual(isTokenizedStock({ symbol: 'HUMEc', name: 'Hume', address: '0x12' }), false);
   assert.strictEqual(isTokenizedStock({ symbol: 'GRASS', name: 'Grass Inc.', address: '0x12' }), false);
-  console.log('✓ punktacja: obliczenia zgodne z ręcznym wyliczeniem (gorące, wczesne, NFT, bramka „za późno”, akcje)');
+  // Nowe tokeny na Robinhood: pierwsze pojawienie, wiek ≤ 30 min, płynność 20–200 tys. $.
+  const rh = { chain: 'robinhood', priceUsd: 0.002, createdAt: now - 15 * 60e3, seenMin: 2, liquidityUsd: 50000 };
+  assert.strictEqual(rhNewWhy(rh, now), null);
+  assert.strictEqual(rhNewWhy(Object.assign({}, rh, { chain: 'solana' }), now), 'inna sieć');
+  assert.strictEqual(rhNewWhy(Object.assign({}, rh, { createdAt: now - 31 * 60e3 }), now), 'za stary');
+  assert.strictEqual(rhNewWhy(Object.assign({}, rh, { seenMin: null }), now), 'nie pierwsze pojawienie', 'tuż po starcie aplikacji nic nie jest „pierwszy raz”');
+  assert.strictEqual(rhNewWhy(Object.assign({}, rh, { seenMin: 25 }), now), 'nie pierwsze pojawienie');
+  assert.strictEqual(rhNewWhy(Object.assign({}, rh, { liquidityUsd: 15000 }), now), 'za mała płynność');
+  assert.strictEqual(rhNewWhy(Object.assign({}, rh, { liquidityUsd: 250000 }), now), 'za duża płynność');
+  assert.strictEqual(rhNewWhy(Object.assign({}, rh, { createdAt: now - 40 * 60e3 }), now, { maxAgeMin: 45 }), null);
+  console.log('✓ punktacja: obliczenia zgodne z ręcznym wyliczeniem (gorące, wczesne, NFT, bramka „za późno”, akcje, nowe na Robinhood)');
 
   // --- Pomiar skuteczności z przesuwanym zegarem ---
   const T0 = 1e12, HOUR = 3.6e6;
@@ -159,7 +169,46 @@ function unit() {
   outcomes.track(al, world(0.5), askedAll, T0 + 168 * HOUR + 60e3);
   assert.deepStrictEqual([al[0].checks.d7.chg, al[0].checks.d7.pk, al[0].checks.d7.approx, al[0].done], [-50, 100, true, true]);
   assert.strictEqual(al[3].checks.h72.missed, true); // aplikacja „nie działała” w oknie 72 h
-  console.log('✓ pomiar skuteczności: 1 h, 6 h, 24 h, 72 h, 7 dni, szczyty ze świec, tokeny znikające i wycofana płynność');
+
+  // Złe odczyty ceny (prawdziwe przypadki z taśmy 11–24.10): podmiana pary i pojedyncze błędy są pomijane,
+  // prawdziwy rug i prawdziwy skok przechodzą – z opóźnieniem jednego skanu na potwierdzenie.
+  const glitchRun = (p0, l0, seq) => {
+    const g = { at: T0, key: 'g', type: 'token', price0: p0, liq0: l0, peak: p0, low: p0, checks: {} };
+    seq.forEach(([p, l], i) => outcomes.track([g], new Map([['g', { priceUsd: p, liquidityUsd: l }]]), new Set(['g']), T0 + (i + 1) * 60e3));
+    return g;
+  };
+  const ray = glitchRun(0.000683, 191659, [[0.000683, 191659], [3.41, 958e6], [3.42, 959e6], [3.41, 958e6], [0.00069, 193000]]);
+  assert.deepStrictEqual([ray.peak, ray.glitches], [0.00069, 3], 'RAYCAT: podmiana pary (cena i płynność ×5000) nigdy nie wchodzi do pomiaru');
+  const prime = glitchRun(0.00108, 226000, [[0.00108, 226000], [0.000056, 21217], [0.00108, 228000]]);
+  assert.deepStrictEqual([prime.low, prime.glitches], [0.00108, 1], 'PRIME: pojedynczy spadek ×19 i powrót – pominięty');
+  const choo = glitchRun(0.00074, 75000, [[0.00074, 75000], [1689, null], [0.00074, 75600]]);
+  assert.strictEqual(choo.peak, 0.00074, 'CHOO: pojedynczy odczyt 1689 $ pominięty');
+  const realRug = glitchRun(1, 50000, [[1, 50000], [0.03, 2000], [0.031, 1900]]);
+  assert.strictEqual(realRug.low, 0.031, 'prawdziwy rug przechodzi po potwierdzeniu');
+  const realPump = glitchRun(1, 50000, [[1, 50000], [30, 90000], [31, 95000]]);
+  assert.strictEqual(realPump.peak, 31, 'prawdziwy skok ×30 przechodzi po potwierdzeniu');
+  const skipMiss = glitchRun(1, 50000, [[1, 50000], [50, 2e9]]);
+  assert.ok(!skipMiss.miss, 'pominięty odczyt nie liczy się jako „token zniknął”');
+
+  // Dokładne TP/SL: wejście po 5 min, pierwsze przekroczenie progów przez 6 h, stop po faktycznej cenie.
+  const fpRun = (seq) => {
+    const f = { at: T0, key: 'f', type: 'token', price0: 1, liq0: 50000, peak: 1, low: 1, checks: {} };
+    for (const [min, p] of seq) outcomes.track([f], new Map([['f', { priceUsd: p, liquidityUsd: 50000 }]]), new Set(['f']), T0 + min * 60e3);
+    return f;
+  };
+  const win = fpRun([[1, 1], [3, 1.2], [6, 2], [30, 2.6], [50, 3.1], [90, 4.2], [200, 2.4], [400, 1.5]]);
+  assert.deepStrictEqual([win.fp.e, win.fp.et], [2, 6], 'wejście: pierwsza cena po 5 min');
+  assert.deepStrictEqual([win.fp.hi[50], win.fp.hi[100], win.fp.lo[30]], [[44, 55], [84, 110], undefined]);
+  assert.strictEqual(outcomes.fpResult(win.fp, 100, 40), 100, 'TP +100% przed stopem');
+  assert.deepStrictEqual([win.fp.done, outcomes.fpResult(win.fp, 200, 50)], [true, -25], 'TP +200% ani SL −50% nie trafiły – wynik z pierwszego skanu po 6 h od wejścia');
+  const lose = fpRun([[6, 1], [20, 0.8], [40, 0.45], [60, 2.5]]);
+  assert.deepStrictEqual(lose.fp.lo[40], [34, -55], 'stop −40% po faktycznej, gorszej cenie (−55%)');
+  assert.strictEqual(outcomes.fpResult(lose.fp, 100, 40), -55, 'stop przed późniejszym TP');
+  const flat = fpRun([[6, 1], [120, 1.1], [6 * 60 + 7, 1.05], [6 * 60 + 9, 3]]);
+  assert.ok(flat.fp.done && flat.fp.end === 5 && outcomes.fpResult(flat.fp, 100, 40) === 5, 'bez TP i SL: wynik po 6 h od wejścia, potem pomiar się nie zmienia');
+  const noEntry = fpRun([[2, 1], [20, 1.1]]);
+  assert.ok(noEntry.fp.none && outcomes.fpResult(noEntry.fp, 100, 40) === null, 'bez ceny w oknie wejścia – brak pomiaru TP/SL');
+  console.log('✓ pomiar skuteczności: 1 h, 6 h, 24 h, 72 h, 7 dni, szczyty ze świec, tokeny znikające i wycofana płynność, złe ceny, TP/SL');
 }
 
 async function integration() {
@@ -191,7 +240,7 @@ async function integration() {
     { at: seedAt, type: 'token', kind: 'early', key: 'solana:' + mock.GOOD, chain: 'solana', address: mock.GOOD, symbol: 'GOOD', score: 60, risk: 'none', price0: 0.00000615, liq0: 100000, peak: 0.00000615, low: 0.00000615, checks: {} },
     { at: Date.now() - 85 * 60e3, type: 'token', kind: 'early', key: 'solana:GoneMint', chain: 'solana', address: 'GoneMint', symbol: 'GONE', score: 55, risk: 'none', price0: 1, liq0: 30000, peak: 1, low: 1, checks: {}, miss: { h1: 3 } },
     old72,
-  ] }));
+  ], firstSeen: { ['robinhood:' + mock.NEWRH]: Date.now() - 5 * 60e3 } })); // NEWRH widziany 5 min przed startem – nie jest „zimny”
   const srv = await mock.start(MOCK);
   const app = spawn(process.execPath, [path.join(__dirname, '..', 'server.js')], { env: Object.assign({}, process.env, { RADAR_CONFIG: path.join(dir, 'config.json'), RADAR_DATA: path.join(dir, 'data') }), stdio: ['ignore', 'pipe', 'inherit'] });
   let out = '';
@@ -261,6 +310,10 @@ async function integration() {
     const alerts = sent.filter((m) => m.text.startsWith('🚨'));
     assert.strictEqual(alerts.length, 0, 'alerty: ' + alerts.map((a) => a.text.split('\n')[0]).join(' | '));
     assert.ok(/Alert: GOOD \(solana\).*wyciszony/.test(out), out);
+    // Nowy token na Robinhood (15 min, płynność 50 tys., widziany pierwszy raz 5 min temu): zapis i pomiar w tle, bez wiadomości.
+    assert.ok(/Nowy Robinhood: NEWRH, wiek 15 min, płynność \$50000 – tylko zapis i pomiar TP\/SL w tle/.test(out), out);
+    assert.ok(!sent.some((m) => m.text.startsWith('🆕')), 'domyślnie bez wiadomości o nowych tokenach na Robinhood');
+    assert.ok(!/Alert: (NEWRH|ROO)/.test(out), 'ROO jest stary, NEWRH za młody na „gorący”');
     // …i dokładnie jeden wczesny sygnał (EARLY). GOOD jest już „gorący”, więc wczesnego nie dostaje.
     const earlyMsgs = sent.filter((m) => m.text.startsWith('🌱'));
     assert.strictEqual(earlyMsgs.length, 1, 'wczesne: ' + earlyMsgs.map((a) => a.text.split('\n')[0]).join(' | '));
@@ -287,6 +340,9 @@ async function integration() {
     assert.ok(/📢 Telegram: kanał „EARLY Portal” – \d+ członków/.test(earlyMsgs[0].text) && /<a href="https:\/\/t\.me\/early_portal">Telegram<\/a>/.test(earlyMsgs[0].text), earlyMsgs[0].text);
     assert.ok(detE.d.tg && detE.d.tg.s === 'public' && detE.d.tg.title === 'EARLY Portal');
     assert.strictEqual(enE.tgStatus, 'public');
+    const rhAlert = live.find((a) => a.symbol === 'NEWRH');
+    assert.ok(rhAlert && rhAlert.kind === 'rh' && rhAlert.muted && !rhAlert.sent && rhAlert.chain === 'robinhood', JSON.stringify(rhAlert));
+    assert.ok(!(rhAlert.enrich && rhAlert.enrich.alert), 'bez dociągania danych dodatkowych (limity API)');
     const goodAlert = live.find((a) => a.symbol === 'GOOD' && a.kind === 'momentum');
     assert.ok(goodAlert.muted && !goodAlert.sent, 'GOOD wyciszony, ale zapisany');
     const detG = await fetchJson(`http://127.0.0.1:${APP}/api/alert?id=${goodAlert.id}`);
@@ -375,6 +431,7 @@ async function integration() {
     assert.ok(replies.every((r) => String(r.chat_id) === '424242'), 'obcy nie może dostać odpowiedzi');
     assert.ok(/52/.test(replies[0].text) && /poza dozwolonym zakresem/.test(replies[1].text) && /solana, base/.test(replies[2].text) && /Krypto Radar/.test(replies[3].text));
     assert.ok(/Solana \(osobno, bez powiadomień\): 3 alertów w 24 h/.test(replies[3].text) && /Alertów w 24 h: 1/.test(replies[3].text), replies[3].text);
+    assert.ok(/Nowe na Robinhood \(tylko pomiar w tle\): 1 w 24 h/.test(replies[3].text), replies[3].text);
     const cfgNow = (await fetch(`http://127.0.0.1:${APP}/api/state`).then((r) => r.json())).config;
     assert.strictEqual(cfgNow.early.minScore, 52, 'obcy nie może zmienić ustawień');
     assert.deepStrictEqual(cfgNow.alerts.chains, ['solana', 'base']);
@@ -393,14 +450,14 @@ async function integration() {
     const logDir = path.join(dir, 'data', 'calls');
     const logLines = fs.readdirSync(logDir).flatMap((f) => fs.readFileSync(path.join(logDir, f), 'utf8').trim().split('\n')).map((l) => JSON.parse(l));
     const calls = logLines.filter((o) => o.t === 'call');
-    assert.deepStrictEqual(calls.filter((c) => !c.backfill && c.id !== 'seed72x').map((c) => c.symbol).sort(), ['EARLY', 'GOOD']);
+    assert.deepStrictEqual(calls.filter((c) => !c.backfill && c.id !== 'seed72x').map((c) => c.symbol).sort(), ['EARLY', 'GOOD', 'NEWRH']);
     assert.deepStrictEqual(calls.filter((c) => c.backfill).map((c) => c.symbol).sort(), ['GONE', 'GOOD']);
     const ce = calls.find((c) => c.symbol === 'EARLY');
     assert.ok(ce.id && ce.price > 0 && ce.liquidityUsd === 60000 && ce.early.parts.demand > 0 && ce.vol.h1 === 12000 && ce.uniq.h1.buyers === 70 && ce.settings.early.minScore === 45 && ce.threshold === 45, JSON.stringify(ce).slice(0, 300));
     assert.ok(!JSON.stringify(logLines).includes('AAAAAAAAAAAA'));
     const pub2 = JSON.parse(gitR('show', 'data:data.json'));
     // Solana liczona osobno: w głównym widoku tylko EARLY (base), w zakładce Solana: GOOD, GONE i wcześniejszy GOOD.
-    assert.ok(pub2.alertsCount && pub2.alertsCount.day === 1 && pub2.alertsCount.sol === 3 && pub2.alertsCount.total === 5, JSON.stringify(pub2.alertsCount));
+    assert.ok(pub2.alertsCount && pub2.alertsCount.day === 1 && pub2.alertsCount.sol === 3 && pub2.alertsCount.rh === 1 && pub2.alertsCount.total === 6, JSON.stringify(pub2.alertsCount));
     assert.deepStrictEqual(pub2.config.solana, { separate: true, telegram: false });
     const pubIdx2 = JSON.parse(gitR('show', 'data:alerts-index.json'));
     const goodRow = pubIdx2.rows.find((r) => r.s === 'GOOD' && r.t === 'm');
@@ -424,6 +481,26 @@ async function integration() {
       ws = (await fetch(base + '/__sent').then((r) => r.json())).slice(nSent3);
     }
     assert.ok(ws.length && /24 h, tylko Solana/.test(ws[0].text) && /Gorące<\/b> – 1 alertów/.test(ws[0].text), ws[0] && ws[0].text);
+    const nSentRh = (await fetch(base + '/__sent').then((r) => r.json())).length;
+    await tgSay(424242, '/wyniki robinhood 24h');
+    await tgSay(424242, '/ustaw rh_tg wł.');
+    await tgSay(424242, '/ustaw rh_wiek 45');
+    let wr = [];
+    for (let i = 0; i < 40 && wr.length < 3; i++) {
+      await sleep(250);
+      wr = (await fetch(base + '/__sent').then((r) => r.json())).slice(nSentRh);
+    }
+    assert.ok(wr.length === 3 && /Nowe na Robinhood – 24 h/.test(wr[0].text) && /Zapisanych: 1/.test(wr[0].text) && /TP \+100% \/ SL −40%: jeszcze brak/.test(wr[0].text), wr[0] && wr[0].text);
+    assert.ok(/^✅/.test(wr[1].text) && /^✅/.test(wr[2].text), JSON.stringify(wr.map((m) => m.text.slice(0, 50))));
+    const cfgRh = JSON.parse(fs.readFileSync(path.join(dir, 'config.json'), 'utf8')).robinhood;
+    assert.deepStrictEqual([cfgRh.telegram, cfgRh.maxAgeMin, cfgRh.maxLiquidityUsd], [true, 45, 200000]);
+    await tgSay(424242, '/ustaw rh_tg wył');
+    await tgSay(424242, '/ustaw rh_wiek 30');
+    for (let i = 0; i < 40; i++) {
+      const c = JSON.parse(fs.readFileSync(path.join(dir, 'config.json'), 'utf8')).robinhood;
+      if (!c.telegram && c.maxAgeMin === 30) break;
+      await sleep(250);
+    }
 
     // Bramka „za późno”, pomijanie akcji i przełączniki Solany z Telegrama; /wyniki odrzucone.
     const nSent4 = (await fetch(base + '/__sent').then((r) => r.json())).length;
@@ -578,14 +655,23 @@ function callLogUnit() {
   R.append({ t: 'call', id: 'ok', at: t0, type: 'token', kind: 'momentum', symbol: 'OK', chain: 'base', score: 60, price: 1, sent: true });
   R.append({ t: 'call', id: 'late', at: t0, type: 'token', kind: 'momentum', symbol: 'LATE', chain: 'base', score: 70, price: 1, sent: false, rej: 'za późno: +80% w 1 h' });
   R.append({ t: 'check', id: 'late', at: t0 + 3.6e6, name: 'h1', chg: -40, p: 0.6 });
-  const SR = R.summary(t0 + 864e5), SJ = R.summary(t0 + 864e5, null, true);
+  R.append({ t: 'call', id: 'rh1', at: t0, type: 'token', kind: 'rh', symbol: 'NEW', chain: 'robinhood', score: 10, price: 1, sent: false, muted: 1 });
+  R.append({ t: 'call', id: 'rh2', at: t0, type: 'token', kind: 'rh', symbol: 'NEW2', chain: 'robinhood', score: 10, price: 1, sent: false, muted: 1 });
+  R.append({ t: 'fp', id: 'rh1', at: t0 + 7 * 3.6e6, e: 1.1, et: 6, hi: { 50: [20, 55], 100: [60, 120] }, lo: {}, end: 30, done: true });
+  R.append({ t: 'fp', id: 'rh2', at: t0 + 7 * 3.6e6, e: 1, et: 5, hi: {}, lo: { 30: [10, -33], 40: [15, -48] }, end: -70, done: true });
+  const SH = R.summary(t0 + 864e5, (c) => c.kind === 'rh');
+  assert.deepStrictEqual([SH.d7.kinds.rh.n, SH.d7.kinds.rh.fp.tp100.n, SH.d7.kinds.rh.fp.tp100.avg, SH.d7.kinds.rh.fp.tp100.tp, SH.d7.kinds.rh.fp.tp50.avg], [2, 2, 26, 50, 8.5]);
+  assert.deepStrictEqual(R.index(t0 + 864e5, 30).find((r) => r.id === 'rh1').f, [100, 30, 50]);
+  const csvH = R.csv().split('\r\n'), hH = csvH[0].replace(/^\uFEFF/, '').split(';'), rowH = csvH.find((l) => l.startsWith('rh2;')).split(';');
+  assert.deepStrictEqual([rowH[hH.indexOf('rodzaj')], rowH[hH.indexOf('pierwsze −40% po min')], rowH[hH.indexOf('strategia TP100/SL40 %')]], ['nowy Robinhood', '15', '-48']);
+  const SR = R.summary(t0 + 864e5, (c) => c.kind !== 'rh'), SJ = R.summary(t0 + 864e5, null, true);
   assert.deepStrictEqual([SR.total, SR.d7.kinds.momentum.n, SJ.total, SJ.d7.kinds.momentum.h1.median], [1, 1, 1, -40], 'odrzucone nie psują statystyk prawdziwych alertów');
   const ir = R.index(t0 + 864e5, 30);
   assert.deepStrictEqual([ir.find((r) => r.id === 'late').rj, ir.find((r) => r.id === 'ok').rj], ['za późno: +80% w 1 h', undefined]);
   const csvR = R.csv().split('\r\n');
   const hR = csvR[0].replace(/^\uFEFF/, '').split(';');
   assert.strictEqual(csvR.find((l) => l.startsWith('late;')).split(';')[hR.indexOf('odrzucony (powód)')], 'za późno: +80% w 1 h');
-  console.log('✓ dziennik alertów: zapis, wyniki, statystyki według okresu, wyniku i sieci, eksport CSV, odrzucone osobno');
+  console.log('✓ dziennik alertów: zapis, wyniki, statystyki według okresu, wyniku i sieci, eksport CSV, odrzucone osobno, TP/SL i nowe na Robinhood');
 }
 
 // ---- Dane dodatkowe: transakcje, insiderzy, GoPlus, taśma, pilnowanie, kopia ----
