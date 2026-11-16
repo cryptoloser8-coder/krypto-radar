@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 # Instalacja Krypto Radaru jako usługi systemd działającej na TWOIM koncie.
-# Kod zostaje tam, gdzie go sklonowałeś (np. ~/krypto-radar), a ustawienia, dane i klucz GitHuba
-# trafiają do ~/krypto-radar-dane (poza repozytorium, żeby token bota nigdy nie trafił na GitHuba).
+# Kod zostaje tam, gdzie go sklonowałeś (np. ~/igo_bot/krypto-radar), a ustawienia, dane i klucz GitHuba
+# trafiają do krypto-radar-dane obok kodu (np. ~/igo_bot/krypto-radar-dane) – poza repozytorium,
+# żeby token bota nigdy nie trafił na GitHuba. Kopie danych lądują obok, w krypto-radar-kopie.
 #
-# Uruchom ze swojego konta:   sudo bash ~/krypto-radar/deploy/install.sh
-# Aktualizacja kodu później:   cd ~/krypto-radar && git pull && sudo systemctl restart krypto-radar
+# Uruchom ze swojego konta:   sudo bash ~/igo_bot/krypto-radar/deploy/install.sh
+# Aktualizacja kodu później:   cd ~/igo_bot/krypto-radar && git pull && sudo systemctl restart krypto-radar
 set -euo pipefail
 
 APP_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -18,8 +19,9 @@ die() { printf '\n\033[31mBłąd:\033[0m %s\n' "$*" >&2; exit 1; }
 RUN_USER="${SUDO_USER:-}"
 [ -n "$RUN_USER" ] && [ "$RUN_USER" != root ] || die "Uruchom przez sudo ze swojego zwykłego konta (nie jako root)."
 RUN_GROUP="$(id -gn "$RUN_USER")"
-HOME_DIR="$(getent passwd "$RUN_USER" | cut -d: -f6)"
-DATA_DIR="$HOME_DIR/krypto-radar-dane"
+# Dane leżą obok katalogu z kodem (wspólny folder, np. ~/igo_bot). Można to nadpisać: RADAR_HOME=/ścieżka.
+BASE_DIR="${RADAR_HOME:-$(dirname "$APP_DIR")}"
+DATA_DIR="$BASE_DIR/krypto-radar-dane"
 CFG="$DATA_DIR/config.json"
 KEY="$DATA_DIR/deploy_key"
 [ -f "$APP_DIR/server.js" ] || die "Nie widzę server.js w $APP_DIR."
